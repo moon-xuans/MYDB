@@ -10,5 +10,6 @@ public class FirstTest {
   @Test
   public void test() {
     System.out.println("test");
+    System.out.println("hello world");
   }
 }
