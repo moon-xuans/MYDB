@@ -6,6 +6,9 @@ package com.auxan.mydb.common;
  */
 public class Error {
 
+  // common
+  public static final Exception CacheFullException = new RuntimeException("Cache is full!");
+
 
   // tm
   public static final Exception BadXidFileException = new RuntimeException("Bad XID file!");
