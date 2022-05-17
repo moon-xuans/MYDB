@@ -10,6 +10,10 @@ public class Error {
   public static final Exception CacheFullException = new RuntimeException("Cache is full!");
 
 
+  // dm
+  public static final Exception MemTooSmallException = new RuntimeException("Memory too small");
+
+
   // tm
   public static final Exception BadXidFileException = new RuntimeException("Bad XID file!");
 }
