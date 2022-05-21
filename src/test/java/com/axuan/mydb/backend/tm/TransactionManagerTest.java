@@ -4,6 +4,8 @@ import com.auxan.mydb.backend.tm.TransactionManager;
 import com.auxan.mydb.backend.tm.impl.TransactionManagerImpl;
 import java.io.File;
 import java.security.SecureRandom;
+import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.Map;
 import java.util.Random;
 import java.util.concurrent.ConcurrentHashMap;
@@ -96,5 +98,4 @@ public class TransactionManagerTest {
     }
     cdl.countDown();
   }
-
 }

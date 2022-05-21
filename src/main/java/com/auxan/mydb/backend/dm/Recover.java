@@ -8,8 +8,11 @@ import com.auxan.mydb.backend.dm.pageCache.PageCache;
 import com.auxan.mydb.backend.tm.TransactionManager;
 import com.auxan.mydb.backend.utils.Panic;
 import com.auxan.mydb.backend.utils.Parser;
+import com.auxan.mydb.common.SubArray;
+import com.google.common.primitives.Bytes;
 import java.lang.reflect.Array;
 import java.nio.ByteBuffer;
+import java.sql.SQLOutput;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
@@ -41,7 +44,6 @@ public class Recover {
   private static final int UNDO = 1; // 记作回滚操作
 
 
-
   /**
    * insertLog:
    * [LogType][XID][PgNo][Offset][Raw]
@@ -60,6 +62,44 @@ public class Recover {
     byte[] oldRaw;
     byte[] newRaw;
   }
+
+
+  // 用于数据恢复
+  public static void recover(TransactionManager tm, Logger lg, PageCache pc) {
+    System.out.println("Recovering...");
+
+    lg.rewind();
+    int maxPgNo = 0;
+    while (true) {
+      byte[] log = lg.next();
+      if (log == null) break;
+      int pgNo;
+      if (isInsertLog(log)) {
+        InsertLogInfo li = parseInsertLog(log);
+        pgNo = li.pgNo;
+      } else {
+        UpdateLogInfo li  = parseUpdateLog(log);
+        pgNo = li.pgNo;
+      }
+      if (pgNo > maxPgNo) {
+        maxPgNo = pgNo;
+      }
+    }
+
+    if (maxPgNo == 0) {
+       maxPgNo = 1;
+    }
+    pc.truncateByPgNo(maxPgNo);
+    System.out.println("Truncate to " + maxPgNo + "pages.");
+
+    redoTransactions(tm, lg, pc);
+    System.out.println("Redo Transactions Over.");
+
+    undoTransactions(tm, lg, pc);
+    System.out.println("Undo Transactions Over.");
+  }
+
+
 
 
   /**
@@ -156,6 +196,20 @@ public class Recover {
   private static final int OF_UPDATE_RAW = OF_UPDATE_UID + 8; // 每个资源UID占8个字节
 
 
+
+
+  public static byte[] updateLog(long xid, DataItem di) {
+    byte[] logType = {LOG_TYPE_UPDATE};
+    byte[] xidRaw = Parser.long2Byte(xid);
+    byte[] uidRaw = Parser.long2Byte(di.getUid());
+    byte[] oldRaw = di.getOldRaw();
+    SubArray raw = di.getRaw();
+    byte[] newRaw = Arrays.copyOfRange(raw.raw, raw.start, raw.end);
+    return Bytes.concat(logType, xidRaw, uidRaw, oldRaw, newRaw);
+  }
+
+
+
   private static UpdateLogInfo parseUpdateLog(byte[] log) {
     UpdateLogInfo li = new UpdateLogInfo();
     li.xid = Parser.parseLong(Arrays.copyOfRange(log, OF_XID, OF_UPDATE_UID));
@@ -203,9 +257,17 @@ public class Recover {
 
 
   // [LogType][XID][PgNo][Offset][Raw]
-  private static final int OF_INSERT_PGNO = OF_XID + 1;
+  private static final int OF_INSERT_PGNO = OF_XID + 8;
   private static final int OF_INSERT_OFFSET = OF_INSERT_PGNO + 4; // 页面编号占4个字节
   private static final int OF_INSERT_RAW = OF_INSERT_OFFSET + 2; // 页面偏移量占2个字节
+
+  public static byte[] insertLog(long xid, Page pg, byte[] raw) {
+    byte[] logTypeRaw = {LOG_TYPE_INSERT};
+    byte[] xidRaw = Parser.long2Byte(xid);
+    byte[] pgNoRaw = Parser.int2Byte(pg.getPageNumber());
+    byte[] offsetRaw = Parser.short2Byte(PageX.getFSO(pg));
+    return Bytes.concat(logTypeRaw, xidRaw, pgNoRaw, offsetRaw, raw);
+  }
 
 
   private static InsertLogInfo parseInsertLog(byte[] log) {

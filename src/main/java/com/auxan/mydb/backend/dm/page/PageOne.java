@@ -1,5 +1,6 @@
 package com.auxan.mydb.backend.dm.page;
 
+import com.auxan.mydb.backend.dm.pageCache.PageCache;
 import com.auxan.mydb.backend.utils.RandomUtil;
 import java.util.Arrays;
 
@@ -15,6 +16,12 @@ public class PageOne {
   private static final int OF_VC = 100;  // 校验值的起始offset
 
   private static final int LEN_VC = 8; // 校验值的长度
+
+  public static byte[] InitRaw() {
+    byte[] raw = new byte[PageCache.PAGE_SIZE];
+    setVcOpen(raw);
+    return raw;
+  }
 
 
 

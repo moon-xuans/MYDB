@@ -5,6 +5,7 @@ package com.auxan.mydb.backend.dm.page;
  * @author axuan
  */
 public interface Page {
+
   /**页面加锁*/
   void lock();
 

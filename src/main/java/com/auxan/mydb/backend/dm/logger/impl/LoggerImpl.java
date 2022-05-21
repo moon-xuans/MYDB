@@ -39,6 +39,8 @@ public class LoggerImpl implements Logger {
 
   private static final int OF_DATA = OF_CHECKSUM + 4; // 校验值+size的长度
 
+  public static final String LOG_SUFFIX = ".log";
+
 
   private RandomAccessFile file;
 
@@ -66,7 +68,7 @@ public class LoggerImpl implements Logger {
     lock = new ReentrantLock();
   }
 
-  void init() {
+  public void init() {
     long size = 0;
     try {
       size = file.length();
@@ -123,7 +125,7 @@ public class LoggerImpl implements Logger {
 
   private int calCheckSum(int xCheck, byte[] log) {
     for (byte b : log) {
-      xCheck = xCheckSum * SEED + b;
+      xCheck = xCheck * SEED + b;
     }
     return xCheck;
   }

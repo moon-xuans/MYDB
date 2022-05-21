@@ -1,8 +1,10 @@
 package com.auxan.mydb.backend.dm.pageIndex;
 
 import com.auxan.mydb.backend.dm.pageCache.PageCache;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * 页面索引，通过按页空闲大小分为40个区间，每次需要获取空间进行插入的时候,便于迅速找到合适的页面
@@ -18,6 +20,13 @@ public class PageIndex {
   private Lock lock;
   private List<PageInfo>[] lists;
 
+  public PageIndex() {
+    lock = new ReentrantLock();
+    lists = new List[INTERVALS_NO + 1];
+    for (int i = 0; i < INTERVALS_NO + 1; i++) {
+      lists[i] = new ArrayList<>();
+    }
+  }
 
   public void add(int pgNo, int freeSpace) {
     lock.lock();

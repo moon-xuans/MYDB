@@ -36,7 +36,7 @@ public class PageCacheImpl extends AbstractCache<Page> implements PageCache{
 
   private AtomicInteger pageNumbers;
 
-  public PageCacheImpl(int maxResources, RandomAccessFile file, FileChannel fc) {
+  public PageCacheImpl(RandomAccessFile file, FileChannel fc, int maxResources) {
     super(maxResources);
     if (maxResources < MEM_MIN_LIM) {
       Panic.panic(Error.MemTooSmallException);
@@ -158,7 +158,7 @@ public class PageCacheImpl extends AbstractCache<Page> implements PageCache{
     } catch (IOException e) {
       Panic.panic(e);
     }
-    fileLock.lock();
+    fileLock.unlock();
     return new PageImpl(pgNo, buf.array(), this);
   }
 

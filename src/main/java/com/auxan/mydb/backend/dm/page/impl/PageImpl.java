@@ -2,6 +2,7 @@ package com.auxan.mydb.backend.dm.page.impl;
 
 import com.auxan.mydb.backend.dm.page.Page;
 import com.auxan.mydb.backend.dm.pageCache.PageCache;
+import java.io.Serializable;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
 
@@ -9,7 +10,8 @@ import java.util.concurrent.locks.ReentrantLock;
  * 页面接口的实现类
  * @author axuan
  */
-public class PageImpl implements Page {
+public class PageImpl implements Page{
+
 
   private int pageNumber;
 
