@@ -20,4 +20,12 @@ public class Error {
 
   // tm
   public static final Exception BadXidFileException = new RuntimeException("Bad XID file!");
+
+
+
+  // vm
+  public static final Exception DeadLockException = new RuntimeException("DeadLock!");
+  public static final Exception NullEntryException = new RuntimeException("Null entry!");
+  public static final Exception ConcurrentUpdateException = new RuntimeException("Concurrent update issue!");
+
 }
