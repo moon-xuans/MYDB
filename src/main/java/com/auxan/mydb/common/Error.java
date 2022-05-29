@@ -28,4 +28,15 @@ public class Error {
   public static final Exception NullEntryException = new RuntimeException("Null entry!");
   public static final Exception ConcurrentUpdateException = new RuntimeException("Concurrent update issue!");
 
+  // tbm
+  public static Exception DuplicationTableException = new RuntimeException("Duplicated table!");
+  public static Exception TableNotFoundException = new RuntimeException("Table not found!");
+  public static Exception InvalidValuesException = new RuntimeException("Invalid values!");
+  public static Exception FieldNotIndexedException = new RuntimeException("Field not indexed!");
+  public static Exception InvalidLogOpException = new RuntimeException("Invalid logic operation!");
+  public static Exception FieldNotFoundException = new RuntimeException("Field not found!");
+  // parser
+  public static Exception InvalidCommandException = new RuntimeException("Invalid command!");
+  public static Exception TableNoIndexException = new RuntimeException("Table has no index!");
+
 }
