@@ -20,7 +20,7 @@ public class ParserTest {
 
   @Test
   public void testCreate() throws Exception {
-    String stat = "create table student id int32, name string, uid int64, (index name id uid)";
+    String stat = "create table student id int32, name string, uid int64 (index name id uid)";
     Object res = Parser.Parser(stat.getBytes());
     Create create = (Create) res;
     assert "student".equals(create.tableName);

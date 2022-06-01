@@ -91,7 +91,7 @@ public class Field {
   }
 
   private static void typeCheck(String fieldType) throws Exception {
-    if (!"int32".equals(fieldType) && !"int64".equals(fieldType) && "string".equals(fieldType)) {
+    if (!"int32".equals(fieldType) && !"int64".equals(fieldType) && !"string".equals(fieldType)) {
       throw Error.InvalidCommandException;
     }
   }
