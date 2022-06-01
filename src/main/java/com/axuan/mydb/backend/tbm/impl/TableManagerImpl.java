@@ -127,7 +127,7 @@ public class TableManagerImpl implements TableManager {
         xidTableCache.put(xid, new ArrayList<>());
       }
       xidTableCache.get(xid).add(table);
-      return ("create" + create.tableName).getBytes();
+      return ("create " + create.tableName).getBytes();
     } finally {
       lock.unlock();
     }

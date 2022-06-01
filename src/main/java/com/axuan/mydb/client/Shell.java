@@ -18,7 +18,7 @@ public class Shell {
     Scanner sc = new Scanner(System.in);
     try {
       while(true) {
-        System.out.println(":> ");
+        System.out.print(":> ");
         String statStr = sc.nextLine();
         if ("exit".equals(statStr) || "quit".equals(statStr)) {
           break;
