@@ -1,8 +1,6 @@
 package com.axuan.mydb.backend.dm.pageIndex;
 
-import com.auxan.mydb.backend.dm.pageCache.PageCache;
-import com.auxan.mydb.backend.dm.pageIndex.PageIndex;
-import com.auxan.mydb.backend.dm.pageIndex.PageInfo;
+import com.axuan.mydb.backend.dm.pageCache.PageCache;
 import org.junit.Test;
 
 /**

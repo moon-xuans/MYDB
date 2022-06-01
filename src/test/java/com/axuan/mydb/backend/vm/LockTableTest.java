@@ -2,10 +2,8 @@ package com.axuan.mydb.backend.vm;
 
 import static org.junit.Assert.assertThrows;
 
-import com.auxan.mydb.backend.utils.Panic;
-import com.auxan.mydb.backend.vm.LockTable;
+import com.axuan.mydb.backend.utils.Panic;
 import java.util.concurrent.locks.Lock;
-import org.junit.Assert;
 import org.junit.Test;
 
 /**

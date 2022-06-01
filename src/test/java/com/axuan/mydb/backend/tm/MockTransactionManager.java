@@ -1,7 +1,5 @@
 package com.axuan.mydb.backend.tm;
 
-import com.auxan.mydb.backend.tm.TransactionManager;
-
 /**
  * @author axuan
  * @date 2022/5/21

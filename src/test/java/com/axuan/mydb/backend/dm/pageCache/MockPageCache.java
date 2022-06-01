@@ -1,7 +1,6 @@
 package com.axuan.mydb.backend.dm.pageCache;
 
-import com.auxan.mydb.backend.dm.page.Page;
-import com.auxan.mydb.backend.dm.pageCache.PageCache;
+import com.axuan.mydb.backend.dm.page.Page;
 import com.axuan.mydb.backend.dm.page.MockPage;
 import java.util.HashMap;
 import java.util.Map;

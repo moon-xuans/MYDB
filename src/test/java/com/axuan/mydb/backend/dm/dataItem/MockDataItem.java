@@ -1,8 +1,7 @@
 package com.axuan.mydb.backend.dm.dataItem;
 
-import com.auxan.mydb.backend.dm.dataItem.DataItem;
-import com.auxan.mydb.backend.dm.page.Page;
-import com.auxan.mydb.common.SubArray;
+import com.axuan.mydb.backend.dm.page.Page;
+import com.axuan.mydb.backend.common.SubArray;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 

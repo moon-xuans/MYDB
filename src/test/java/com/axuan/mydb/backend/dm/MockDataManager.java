@@ -1,8 +1,7 @@
 package com.axuan.mydb.backend.dm;
 
-import com.auxan.mydb.backend.dm.DataManager;
-import com.auxan.mydb.backend.dm.dataItem.DataItem;
-import com.auxan.mydb.common.SubArray;
+import com.axuan.mydb.backend.dm.dataItem.DataItem;
+import com.axuan.mydb.backend.common.SubArray;
 import com.axuan.mydb.backend.dm.dataItem.MockDataItem;
 import java.util.HashMap;
 import java.util.Map;

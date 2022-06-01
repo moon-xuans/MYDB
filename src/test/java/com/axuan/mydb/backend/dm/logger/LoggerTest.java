@@ -1,7 +1,5 @@
 package com.axuan.mydb.backend.dm.logger;
 
-import com.auxan.mydb.backend.dm.logger.Logger;
-import com.auxan.mydb.common.util.FileUtil;
 import java.io.File;
 import org.junit.Test;
 
