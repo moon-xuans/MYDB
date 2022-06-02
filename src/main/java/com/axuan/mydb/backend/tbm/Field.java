@@ -226,7 +226,7 @@ public class Field {
         res.shift = 4;
         break;
       case "int64":
-        res.v = Parser.parseLong(Arrays.copyOf(raw, 4));
+        res.v = Parser.parseLong(Arrays.copyOf(raw, 8));
         res.shift = 8;
         break;
       case "string":

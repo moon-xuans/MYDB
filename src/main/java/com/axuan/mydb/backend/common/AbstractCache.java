@@ -118,7 +118,8 @@ public abstract class AbstractCache<T> {
     try {
       Set<Long> keys = cache.keySet();
       for (long key :keys) {
-        // 这里关闭，写回资源的时候，无论是否外面引用，都会移除缓存，如果references == 0,那么就会刷新到数据库；否则，直接移除。
+        // 这里关闭，写回资源的时候，无论是否外面引用，都会移除缓存，
+        // 如果references == 0,那么就会刷回数据源；否则，直接移除。
         release(key);
         references.remove(key);
         cache.remove(key);

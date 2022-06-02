@@ -74,7 +74,7 @@ public class TransactionManagerImpl implements TransactionManager {
     }
   }
 
-  // 根据事物xid取得其在xid文件对应的位置
+  // 根据事务xid取得其在xid文件对应的位置
   private long getXidPosition(long xid) {
     return LEN_XID_HEADER_LENGTH + (xid - 1) * XID_FIELD_SIZE;
   }
