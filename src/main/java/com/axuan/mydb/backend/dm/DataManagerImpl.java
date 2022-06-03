@@ -56,6 +56,7 @@ public class DataManagerImpl extends AbstractCache<DataItem> implements DataMana
       throw Error.DataToolLargeException;
     }
 
+    // 尝试获取可用页
     PageInfo pi = null;
     for (int i = 0; i < 5; i++) {
       pi = pIndex.select(raw.length);
@@ -74,9 +75,11 @@ public class DataManagerImpl extends AbstractCache<DataItem> implements DataMana
     int freeSpace = 0;
     try {
       pg = pc.getPage(pi.pgNo);
+      // 首先做日志
       byte[] log = Recover.insertLog(xid, pg, raw);
       logger.log(log);
 
+      // 再执行插入操作
       short offset = PageX.insert(pg, raw);
 
       pg.release();
@@ -122,9 +125,9 @@ public class DataManagerImpl extends AbstractCache<DataItem> implements DataMana
 
   @Override
   protected DataItem getForCache(long uid) throws Exception {
-    short offset = (short)(uid & ((1L << 16) - 1));
+    short offset = (short)(uid & ((1L << 16) - 1)); // offset占后两个字节
     uid >>>= 32;
-    int pgNo = (int)(uid & ((1L << 32) - 1));
+    int pgNo = (int)(uid & ((1L << 32) - 1)); // pgNo占前四个字节
     Page pg = pc.getPage(pgNo);
     return DataItem.parseDataItem(pg, offset, this);
   }

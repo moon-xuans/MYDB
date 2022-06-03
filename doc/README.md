@@ -2,19 +2,19 @@
 ## 1.前言
 MYDB是一个Java实现的简单的基于文件的简易版数据库，实现了一些数据库的基本功能。
 - 数据的可靠性和数据恢复
-- 两段锁协议实现可串行化调度
+- 两段锁协议(2PL)实现可串行化调度
 - MVCC
-- 两种事务隔离级别
+- 两种事务隔离级别(读提交和可重复读)
 - 死锁处理
 - 简单的表和字段管理
-- SQL解析
+- 简单的SQL解析
 - 基于socket的client和server。
 
 整体上分为tm事务控制层，dm数据存储层，vm版本控制层，im索引层，tbm表结构层，transport传输层。
 ## 2.功能实现
-### 2.2.TM(事务控制)
+### 2.1.TM(事务控制)
 TM通过维护XID文件来维护事务的状态，并提供接口供其他模块来查询某个事务。
-#### 2.2.1.xid文件的定义
+#### 2.1.1.xid文件的定义
 ![img.png](img.png)
 xid文件的前8个字节，记录事务的个数，事务xid的状态记录在(xid - 1) + 8字节处，每个事务的状态由由一个字节表示，状态分为3种，0代表活跃状态，1代表提交状态，2代表丢弃状态。
 ![img.png](img_1.png)
@@ -22,7 +22,7 @@ xid是从1开始的，而xid为0为超级事务，当一些操作想在没有申
 
 TM提供了一些接口供其他模块调用，用来创建事务和查询事务状态的:
 ![img_2.png](img_2.png)
-#### 2.2.2.实现
+#### 2.1.2.实现
 整体上所有的方法都是围绕xid文件进行操作的，在这里为了使文件读取更加方便使用的是NIO的FileChannel,每次开启一个事务，xidCounter就会+1，
 并且会更新到文件头，来确保其数量正确，并且每次开启一个事务，都会立即刷回到磁盘，防止崩溃。
 ![img_5.png](img_5.png)
@@ -33,7 +33,7 @@ TM提供了一些接口供其他模块调用，用来创建事务和查询事务
 而事务的状态则是可以通过xid，来反推出它的位置，读取这个位置的数据，进行判断。
 ![img_3.png](img_3.png)
 ![img_4.png](img_4.png)
-### 2.3.计数缓存和共享内存
+### 2.2.计数缓存和共享内存
 MYDB中最底层的模块——DataManager;
 > DM直接管理数据库DB文件和日志文件。DM的主要职责有:1)分页管理DB文件，并进行缓存;2)
 > 管理日志文件，保证在发生错误时可以根据日志进行恢复；3)抽象DB文件为DataItem供上层使用，
@@ -113,3 +113,490 @@ subArray的操作的时候，只会在底层进行一个复制，无法共用同
 
 因此，有一个SubArray类，来规定这个数据的可使用范围。
 ![img_14.png](img_14.png)
+### 2.3.数据页的缓存与管理
+这里主要是DM模块向下对文件系统的抽象部分。DM将文件系统抽象成页面，每次对
+文件系统的读写都是以页面为单位的。同样，从文件系统读进来也是以页面为单位进行缓存的。
+
+#### 2.3.1.页面缓存
+这里首先要规定页面大小，和一般数据库一样，数据页大小定为8k。如果想要提升数据库
+写入大量数据情况下性能的话，也可以适当增大这个值。
+
+要实现出缓存页面，那肯定要借助之前设计的通用缓存框架。但是，要先定义出
+页面的结构。注意这个页面是存储在内存中的，与已经持久化到磁盘的抽象页面
+有所区别。
+
+定义一个页面如下：
+![img_15.png](img_15.png)
+其中，pageNumber为页面的页号，该页号从1开始。data就是该数据页实际包含
+的字节数据。dirty标志着这个页面是否是脏页面，在缓存驱逐的时候，脏页面需要
+被写回磁盘。
+
+定义页面缓存的接口如下：
+![img_16.png](img_16.png)
+页面缓存的具体实现类，需要继承抽象缓存框架，并且实现`getForCache()`和
+`releaseForCache()`两个抽象方法。由于这里数据源就是文件系统，`getForCache`
+直接从文件中读取，并包裹成Page即可；
+![img_17.png](img_17.png)
+而`releaseForCache()`驱逐页面时，也只需要根据页面是否是脏页，来决定
+是否需要写回文件系统。
+![img_18.png](img_18.png)
+从这里可以看出来，同一条数据是不允许跨页存储的。这意味着，单条数据的大小
+不能超过数据库页面的大小。
+#### 2.3.2.数据页管理
+##### 2.3.2.1.第一页
+数据库文件的第一页，通常用作一些特殊用途，比如存储一些元数据，用来启动检查
+什么的。MYDB的第一页，只是用来做启动检查的。具体的原理是，在每次数据库启动时，
+会生成一串随机字节，存储在100～107字节。在数据库正常关闭时，会将这串字节，拷贝
+到第一页的108～115字节。
+![img_25.png](img_25.png)
+
+这样数据库在每次启动时，就会检查第一页两处的字节是否相同，以此来判断上一次是否正常关闭。
+如果是异常关闭，就需要执行数据的恢复流程(通过日志进行恢复).
+
+启动时设置初始字节：
+![img_19.png](img_19.png)
+关闭时拷贝字节：
+![img_20.png](img_20.png)
+启动时，校验字节：
+![img_21.png](img_21.png)
+##### 2.3.2.2.普通页
+MYDB在普通数据页的管理比较简单。一个普通页面以一个2字节无符号数起始，表示
+这一页的空闲位置的偏移。剩下的部分都是实际存储的数据。
+![img_38.png](img_38.png)
+所以对普通页的管理，基本都是围绕对FSO(Free Space Offset)进行的。例如
+向页面插入数据：
+![img_22.png](img_22.png)
+在写入之前获取FSO，来确定写入的位置，并在写入后更新FSO。FSO的操作如下：
+![img_23.png](img_23.png)
+其次，PageX中有两个需要用到的函数是`recoverInsert()`和`recoverUpdate()`
+用于在数据库崩溃后重新打开时，恢复例程直接插入数据以及修改数据使用。(日志恢复中
+会使用到)
+![img_24.png](img_24.png)
+### 2.4.日志文件与恢复策略
+MYDB提供了崩溃后的数据恢复功能。DM层在每次对底层数据操作时，都会记录一条日志
+到磁盘上。在数据库崩溃之后，再次启动时，可以根据日志的内容，恢复数据文件，保证其一致性。
+#### 2.4.1.日志读写
+日志的二进制文件，按照如下的格式进行排布：
+![img_39.png](img_39.png)
+其中XCheckNum是一个四字节的整数，是对后续所有日志计算的校验和。Log1~LogN
+是常规的日志数据，BadTail是在数据库崩溃时，没有来得及写完的日志数据，这个BadTail
+不一定存在。
+
+每条日志的格式如下：
+
+![img_40.png](img_40.png)
+
+其中，Size是一个四字节整数，标识了Data段的字节数。CheckSum则是该条日志的校验和。
+
+单条日志的校验和，其实就是通过一个指定的种子实现的。
+![img_29.png](img_29.png)
+这样，对所有日志求出校验和，求和就能得到日志文件的校验和了。
+
+Logger被实现成迭代器模式，通过`next()`方法，不断地从文件读出下一条日志，并将
+其中的Data解析出来并返回。`next()`方法的实现主要依赖`internNext()`，大致如下，其中
+position是当前日志文件读到的位置偏移。
+![img_30.png](img_30.png)
+在打开一个日志文件时，需要首先校验日志文件的XCheckSum,并移除文件尾部
+可能存在的BadTail,由于BadTail该条日志尚未写入完成，文件的校验和也就不会
+包含该日志的校验和，去掉BadTail即可保证日志文件的一致性。
+![img_31.png](img_31.png)
+向日志文件写入日志时，也是首先将数据包裹成日志格式，写入文件后，再更新
+文件的校验和，更新校验和时，会刷新缓存区，保证内容写入磁盘。
+![img_36.png](img_36.png)
+#### 2.4.2.恢复策略
+DM为上层模块，提供了两种策略，分别是插入新数据(I)和更新现有数据(U)，
+删除数据在VM层进行实现。
+
+DM的日志策略：
+
+在进行I和U操作之前，必须先进行对应的日志操作，在保证日志写入磁盘后，才能进行
+数据操作。
+
+这个日志策略，使得DM对于数据操作的磁盘同步，可以更加随意。日志在数据操作
+之前，保证到达了磁盘，那么即使该数据最后没有来得及同步到磁盘，数据库
+就发生了崩溃，后续也可以通过磁盘上的日志恢复该数据。
+
+对于两种数据操作，DM记录的日志如下：
+> (Ti,I,A,x),表示事务Ti在A位置插入了一条数据x
+> 
+> (Ti,U,A,oldx,newx),表示事务Ti将A位置的数据，从oldx更新成newx
+
+##### 2.4.2.1.单线程
+由于单线程，Ti，Tj和Tk的日志永远不会相交。这种情况日志恢复很简单，假设
+日志中的最后一个事务是Ti:
+> 1.对Ti之前所有的事务的日志，进行恢复
+> 
+> 2.接着检查Ti的状态(XID)文件，如果Ti的状态是已完成(包括committed和aborted)，
+> 就将Ti重做(redo)，否则进行撤销(undo)
+
+对事务进行redo:
+> 1.正序扫描事务T的所有日志
+> 
+> 2.如果日志是插入操作(Ti,I,A,x)，就将x重新插入A位置
+> 
+> 3.如果日志是更新操作(Ti,U,A,oldx,newx)，就将A位置的值设置为newx
+
+对事务进行undo:
+> 1.倒序扫描事务T的所有日志
+> 
+> 2.如果日志是插入操作(Ti,I,A,x),就将A位置的数据进行删除
+> 
+> 3.如果日志是更新操作(Ti,U,A,oldx,newx),就将A位置的值设置为oldx
+
+MYDB中没有真正的删除操作，对于插入操作的undo，只是将其中的标志位设置为invalid。
+
+##### 2.4.2.2.多线程
+在多线程的情况下，如果两个事务在同时进行操作，那么如果是要进行回滚，
+就需要级联回滚，但是有时候committed的事务，应当被持久化，就会造成矛盾。
+因此这里需要保证:
+> 规定1：正在进行的事务，不会读取其他任何未提交的事务产生的数据。
+> 
+> 规定2：正在进行的事务，不会修改其他任何未提交的事务修改或产生的数据。
+
+
+因此，出现了VM层，在MYDB中，由于VM的存在，传递到DM层，真正执行的操作
+序列，都可以保护规定1和规定2。有了VM层的限制，并发情况下日志的恢复就很简单了：
+> 1.重做所有崩溃时已完成(committed或aborted)的事务
+> 
+> 2.撤销所有崩溃未完成(active)的事务
+
+在恢复后，数据库就会恢复到所有已完成事务结束，所有未完成事务尚未开始的状态。
+##### 2.4.2.3.实现
+首先规定两种日志的格式：
+![img_41.png](img_41.png)
+![img_43.png](img_43.png)
+跟原理中描述的类似，recover过程主要也是两步：重做所有已完成事务，撤销所有
+未完成事务：
+![img_44.png](img_44.png)
+![img_45.png](img_45.png)
+
+updateLog和insertLog的重做和撤销处理，分别合成一个方法来实现。
+![img_46.png](img_46.png)
+![img_47.png](img_47.png)
+注意，`doInsertLog()`方法中的删除，使用的是` DataItem.setDataItemRawInvalid(li.raw);`,
+大致的作用，就是将该条DataItem的有效位设置为无效，来进行逻辑删除。
+### 2.5.页面索引与DM的实现
+这里是DM的最后一个环节，设计一个简单的页面索引。并且实现了DM层对于
+上层的抽象：DataItem。
+#### 2.5.1.页面索引
+页面索引，缓存了每一页的空闲空间。用于在上层模块进行插入时，能够快速
+找到一个合适空间的页面，而无需从磁盘或者缓存检查每一个页面的信息。
+
+MYDB是将一页的空间划分成了40个区间。在启动时，就会遍历所有的页面信息，
+获取页面的空闲空间，安排到这40个区间中。insert请求一个页时，会首先将所需
+的空间向上取整，映射到某一个区间，随后取出这个区间的任何一页，都可以满足需求。
+
+pageIndex的实现，就是利用一个List类型的数组。
+```java
+ // 将一页化成40个空间
+  private static final int INTERVALS_NO = 40;
+  private static final int THRESHOLD = PageCache.PAGE_SIZE / INTERVALS_NO;
+
+  private List<PageInfo>[] lists;
+```
+从PageIndex中获取页面也很简单，算出区间号，直接取出即可；
+```java
+  public PageInfo select(int spaceSize) {
+    lock.lock();
+    try {
+      int number = spaceSize / THRESHOLD;
+      if (number < INTERVALS_NO) number++;  // 对计算出的区间向上取整
+      while (number <= INTERVALS_NO) {
+        if (lists[number].size() == 0) { // 如果计算出的区间大小没有合适的，那么就加，找到更大的区间
+          number++;
+          continue;
+        }
+        return lists[number].remove(0); // 找到后，会将整个页面移出，避免并发操作，这里肯定是每个页面只被添加了一次
+      }
+      return null;
+    } finally {
+      lock.unlock();
+    }
+  }
+```
+返回的PageInfo包含页号和空闲空间大小的信息。
+
+可以看到，被选择的页，会直接从PageIndex中移除，这意味着，同一个页面时不允许
+并发写的。在上层模块使用完这个页面后，需要将其重新插入PageIndex;
+```java
+  public void add(int pgNo, int freeSpace) {
+    lock.lock();
+    try {
+      int number = freeSpace / THRESHOLD;
+      lists[number].add(new PageInfo(pgNo, freeSpace));
+    } finally {
+      lock.unlock();
+    }
+  }
+```
+在DataManager被创建时，需要获取所有页面并填充PageIndex;
+```java
+ // 初始化pageIndex
+  void fillPageIndex() {
+    int pageNumber = pc.getPageNumber();
+    for (int i = 2; i <= pageNumber; i++) {
+      Page pg = null;
+      try {
+        pg = pc.getPage(i);
+      } catch (Exception e) {
+        Panic.panic(e);
+      }
+      pIndex.add(pg.getPageNumber(), PageX.getFreeSpace(pg));
+      pg.release();
+    }
+  }
+```
+在使用完Page后需要及时release，否则可能会撑爆缓存。
+#### 2.5.2.DataItem
+DataItem是DM层向上层提供的数据抽象。上层模块通过地址，向DM请求到对应的
+DataItem，再获取到其中的数据。
+
+DataItem的实现：
+```java
+public class DataItemImpl implements DataItem {
+  private SubArray raw;
+  private byte[] oldRaw;  // 旧数据，和普通数据一样，包括ValidFlag/DataSize/Data
+  private DataManagerImpl dm;
+  private long uid;
+  private Page pg;
+```
+保存一个dm的引用是因为其释放依赖dm的释放(dm同时实现了缓存接口，用于缓存
+DataItem),以及修改数据时落地日志。
+
+DataItem中保存的数据，结构如下：
+![img_48.png](img_48.png)
+
+其中ValidFlag占用1字节，标识了该DataItem是否有效。删除一个DataItem
+，只需要简单地将其有效位置设置为0。DataSize占用2字节，标识了后面Data
+的长度。
+
+上层模块在获取到DataItem后，可以通过`data()`方法，该方法返回的数组
+是数据共享的，而不是拷贝实现的，所以使用了SubArray。
+```java
+  @Override
+  public SubArray data() {
+    return new SubArray(raw.raw, raw.start + OF_DATA, raw.end);
+  }
+```
+在上层模块试图对DataItem进行修改时，需要遵循一定的流程：在修改之前需要调用
+`before()`方法，想要撤销修改时，调用`unBefore()`方法，在修改完成后，调用
+`after()`方法。整个流程，主要是为了保存前相数据，并及时落地日志。DM
+会保证对DataItem的修改是原子性的。
+```java
+@Override
+  public void before() {
+    wLock.lock();
+    pg.setDirty(true);
+    System.arraycopy(raw.raw, raw.start, oldRaw,0, oldRaw.length); // 这里的拷贝，我猜测是整体上拷贝，修改一部分，也会全部拷贝
+  }
+
+  @Override
+  public void unBefore() {
+    System.arraycopy(oldRaw, 0, raw.raw, raw.start, oldRaw.length);
+    wLock.unlock();
+  }
+
+  @Override
+  public void after(long xid) {
+    dm.logDataItem(xid, this);
+    wLock.unlock();
+  }
+```
+`after()`方法，主要就是调用dm中的一个方法，对修改操作落日志。
+
+在使用完DataItem后，应该及时调用release()方法，释放掉DataItem的缓存
+```java
+  @Override
+  public void release() {
+    dm.releaseDataItem(this);
+  }
+```
+#### 2.5.3.DM的实现
+DataManager是DM层直接对外提供方法的类，同时，也实现成DataItem对象的
+缓存。DataItem存储的key，是由页号和页内偏移组成的一个8字节无符号整数，
+页号和偏移各占4字节。
+
+DataItem缓存，`getForCache()`,只需要从key中解析出页号，从pageCache中获取
+到页面，再根据偏移，解析出DataItem即可。
+```java
+  @Override
+  protected DataItem getForCache(long uid) throws Exception {
+    short offset = (short)(uid & ((1L << 16) - 1)); // offset占后两个字节
+    uid >>>= 32;
+    int pgNo = (int)(uid & ((1L << 32) - 1)); // pgNo占前四个字节
+    Page pg = pc.getPage(pgNo);
+    return DataItem.parseDataItem(pg, offset, this);
+  }
+```
+DataItem缓存释放，需要将DataItem写回数据源，由于对文件的读写是以页为单位
+进行的，只需要将DataItem所在的页release即可：
+```java
+  @Override
+  protected void releaseForCache(DataItem di) {
+    di.page().release();
+  }
+```
+从已有文件创建DataManager和从空文件创建DataMangaer的流程稍有不同，除了
+PageCache和Logger的创建方式有所不同以外，从空文件创建首先需要对第一页
+进行初始化，而从已有文件创建，则是需要对第一页进行校验，来判断是否需要执行
+恢复流程。并重新对第一页生成随机字节。
+```java
+ public static DataManager create(String path, long mem, TransactionManager tm) {
+    PageCache pc = PageCache.create(path, mem);
+    Logger lg = Logger.create(path);
+
+    DataManagerImpl dm = new DataManagerImpl(pc, lg, tm);
+    dm.initPageOne();
+    return dm;
+  }
+
+  public static DataManager open(String path, long mem, TransactionManager tm) {
+    PageCache pc = PageCache.open(path, mem);
+    Logger lg = Logger.open(path);
+    DataManagerImpl dm = new DataManagerImpl(pc, lg, tm);
+    if (!dm.loadCheckPageOne()) {
+      Recover.recover(tm, lg, pc);
+    }
+    dm.fillPageIndex();
+    PageOne.setVcOpen(dm.pageOne);
+    dm.pc.flushPage(dm.pageOne);
+
+    return dm;
+  }
+```
+其中，初始化第一页，和校验第一页，都是调用PageOne类中的方法实现的：
+```java
+// 在创建文件时初始化pageOne
+  void initPageOne() {
+    int pgNo = pc.newPage(PageOne.InitRaw());
+    assert pgNo == 1;
+    try {
+      pageOne = pc.getPage(pgNo);
+    } catch (Exception e) {
+      Panic.panic(e);
+    }
+    pc.flushPage(pageOne);
+  }
+
+  // 在打开已有文件时读入PageOne，并验证正确性
+  public boolean loadCheckPageOne() {
+    try {
+      pageOne = pc.getPage(1);
+    } catch (Exception e) {
+      Panic.panic(e);
+    }
+    return PageOne.checkVc(pageOne);
+  }
+```
+ DM层提供了三个功能供上层使用，分别是读，插入和修改。修改是通过读出的
+ DataItem实现的，于是，DataManager只需要提供`read()`和`insert()`
+ 方法。
+ 
+`read()`根据UID从缓存中获取DataItem，并校验有效位：
+```java
+  @Override
+  public DataItem read(long uid) throws Exception {
+    DataItemImpl di = (DataItemImpl) super.get(uid);
+    if (!di.isValid()) {
+      di.release();
+      return null;
+    }
+    return di;
+  }
+```
+`insert()`方法，在pageIndex中获取一个足以存储插入内容的页面的页号，
+获取页号后，首先需要写入插入日志，接着才可以通过PageX插入数据，并返回
+插入位置的偏移量。最后需要将页面信息重新插入pageIndex.
+```java
+  @Override
+  public long insert(long xid, byte[] data) throws Exception {
+    byte[] raw = DataItem.wrapDataItemRaw(data);
+    if (raw.length > PageX.MAX_FREE_SPACE) {
+      throw Error.DataToolLargeException;
+    }
+
+    // 尝试获取可用页
+    PageInfo pi = null;
+    for (int i = 0; i < 5; i++) {
+      pi = pIndex.select(raw.length);
+      if (pi != null) {
+        break;
+      } else {
+        int newPage = pc.newPage(PageX.initRaw());
+        pIndex.add(newPage, PageX.MAX_FREE_SPACE);
+      }
+    }
+    if (pi == null) {
+      throw Error.DataToolLargeException;
+    }
+
+    Page pg = null;
+    int freeSpace = 0;
+    try {
+      pg = pc.getPage(pi.pgNo);
+      // 首先做日志
+      byte[] log = Recover.insertLog(xid, pg, raw);
+      logger.log(log);
+
+      // 再执行插入操作
+      short offset = PageX.insert(pg, raw);
+
+      pg.release();
+      return Types.addressToUid(pi.pgNo, offset);
+
+    } finally {
+      // 将取出的pg重新插入pIndex
+      if (pg != null) {
+        pIndex.add(pi.pgNo, PageX.getFreeSpace(pg));
+      } else {
+        pIndex.add(pi.pgNo, freeSpace);
+      }
+    }
+  }
+```
+DataManager正常关闭时，需要执行缓存和日志的关闭流程，并且要设置第一页的
+字节校验。
+```java
+  @Override
+  public void close() {
+    super.close();
+    logger.close();
+
+    PageOne.setVcClose(pageOne);
+    pageOne.release();
+    pc.close();
+  }
+```
+### 2.6.记录的版本与事务隔离
+> VM基于两段锁协议实现了调度序列的可串行化，并实现了MVCC以消除读写阻塞。同时
+实现了两种隔离级别。
+
+类似于DataManager是MYDB的数据管理核心，VersionManager是MYDB的事务和数据
+版本的管理核心。
+#### 2.6.1.2PL与MVCC
+##### 2.6.1.1.冲突与2PL
+数据库中的冲突，如果只考虑更新操作(U)和读操作(R)，两个操作只要满足下面
+三个条件，就可以说这两个操作相互冲突：
+> 1.这两个操作是由不同的事务执行
+> 
+> 2.这两个操作 操作的是同一个数据项
+> 
+> 3.这两个操作至少有一个是更新操作
+
+那么这样，对同一个数据操作的冲突，就有两种情况:
+> 1.两个不同事务的U操作冲突
+>
+> 2.两个不同事务的U/R操作冲突
+
+冲突或者不冲突的影响在于，交换两个互不冲突的操作的顺序，不会对最终的结果
+造成影响，而交换两个冲突操作的顺序，则是会造成影响的。
+
+因此，VM的一个很重要的职责，就是实现了调度序列的可串行化。MYDB采用两段
+锁协议(2PL)来实现。当采用2PL时，如果某个事务i已经对x加锁，且另一个事务j
+也想操作x，但是这个操作与事务i之前的操作相互冲突的话，事务j就会被阻塞。
+譬如，T1已经因为U1(x)锁定了x，那么T2对x的读或者写操作都会被阻塞，T2必须
+等待T1释放掉对x的锁。
+
+由此看来，2PL确实保证了调度序列的可串行化，但是不可避免地导致了事务的相互阻塞，
+甚至可能导致死锁。MYDB为了提供事务处理的效率，降低阻塞概率，实现了MVCC。
+

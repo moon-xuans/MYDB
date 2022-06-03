@@ -47,6 +47,15 @@ public class PageX {
     return Parser.parseShort(Arrays.copyOfRange(raw, OF_FREE, OF_DATA));
   }
 
+  /**
+   * 获得页面的空闲空间大小
+   * @param pg
+   * @return
+   */
+  public static int getFreeSpace(Page pg) {
+    return PageCache.PAGE_SIZE - (int)getFSO(pg.getData());
+  }
+
 
   /**
    * 将raw插入pg中，返回插入位置
@@ -63,14 +72,7 @@ public class PageX {
   }
 
 
-  /**
-   * 获得页面的空闲空间大小
-   * @param pg
-   * @return
-   */
-  public static int getFreeSpace(Page pg) {
-    return PageCache.PAGE_SIZE - (int)getFSO(pg.getData());
-  }
+
 
 
   /**

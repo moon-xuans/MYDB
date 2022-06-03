@@ -115,7 +115,7 @@ public class LoggerImpl implements Logger {
       Panic.panic(e);
     }
     try {
-      file.seek(position); // 这里我猜测先回到position，再rewind。
+      file.seek(position);
     } catch (IOException e) {
       Panic.panic(e);
     }

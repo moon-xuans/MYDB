@@ -136,6 +136,9 @@ public class Recover {
    * 这里回滚也是针对不同的操作，不过它的顺序是从尾部开始遍历
    * Insert: 会将对应page的offset，改成一个无效值
    * Update: 会将对应page的offset，改成oldRaw，也就是旧值
+   * // 这里下面的逻辑都是一样的？为什么要分成两个判断。
+   * // 我的理解是获得每个log之后，先通过log[0]来判断它是哪种日志，因为日志的存储方式不一样，转换的方式也不一样。
+   * // 当然，这样做的目的主要还是取出xid，方便后续操作
    * @param tm
    * @param lg
    * @param pc
@@ -146,9 +149,7 @@ public class Recover {
     while (true) {
       byte[] log = lg.next();
       if (log == null) break;
-      // 这里下面的逻辑都是一样的？为什么要分成两个判断。
-      // 我的理解是获得每个log之后，先通过log[0]来判断它是哪种日志，因为日志的存储方式不一样，转换的方式也不一样。
-      // 当然，这样做的目的主要还是取出xid，方便后续操作
+
       if (isInsertLog(log)) {
         InsertLogInfo li = parseInsertLog(log);
         long xid = li.xid;

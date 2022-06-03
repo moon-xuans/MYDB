@@ -62,26 +62,7 @@ public class PageCacheImpl extends AbstractCache<Page> implements PageCache {
     return pgNo;
   }
 
-  /**
-   * 用于将页面刷新到文件磁盘
-   * @param pg
-   */
-  private void flush(Page pg) {
-    int pgNo = pg.getPageNumber();
-    long offset = pageOffset(pgNo);
 
-    fileLock.lock();
-    try {
-      ByteBuffer buf = ByteBuffer.wrap(pg.getData());
-      fc.position(offset);
-      fc.write(buf);
-      fc.force(false);
-    } catch (IOException e) {
-      Panic.panic(e);
-    } finally {
-      fileLock.unlock();
-    }
-  }
 
 
   @Override
@@ -136,6 +117,27 @@ public class PageCacheImpl extends AbstractCache<Page> implements PageCache {
     if (pg.isDirty()) {
       flush(pg);
       pg.setDirty(false);
+    }
+  }
+
+  /**
+   * 用于将页面刷新到文件磁盘
+   * @param pg
+   */
+  private void flush(Page pg) {
+    int pgNo = pg.getPageNumber();
+    long offset = pageOffset(pgNo);
+
+    fileLock.lock();
+    try {
+      ByteBuffer buf = ByteBuffer.wrap(pg.getData());
+      fc.position(offset);
+      fc.write(buf);
+      fc.force(false);
+    } catch (IOException e) {
+      Panic.panic(e);
+    } finally {
+      fileLock.unlock();
     }
   }
 

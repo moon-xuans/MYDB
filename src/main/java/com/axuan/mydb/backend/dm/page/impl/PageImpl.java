@@ -21,7 +21,7 @@ public class PageImpl implements Page{
   private Lock lock;
 
 
-  // 这里Page的实现类有一个pageCache的引用，是为了方便使用
+  // 这里Page的实现类有一个pageCache的引用，是为了方便缓存的获取和释放
   private PageCache pc;
 
 

@@ -7,7 +7,7 @@ import com.axuan.mydb.backend.dm.pageCache.PageCache;
 import com.axuan.mydb.backend.tm.TransactionManager;
 
 /**
- * dm只向上提供读和插入操作，修改操作游dataItem实现
+ * dm只向上提供读和插入操作，修改操作由dataItem实现
  * @author axuan
  */
 public interface DataManager {

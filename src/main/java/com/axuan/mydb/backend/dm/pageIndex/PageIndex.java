@@ -44,7 +44,7 @@ public class PageIndex {
       int number = spaceSize / THRESHOLD;
       if (number < INTERVALS_NO) number++;  // 对计算出的区间向上取整
       while (number <= INTERVALS_NO) {
-        if (lists[number].size() == 0) { // 如果计算出的区间大小没有合适的，那末就加，找到更大的区间
+        if (lists[number].size() == 0) { // 如果计算出的区间大小没有合适的，那么就加，找到更大的区间
           number++;
           continue;
         }
