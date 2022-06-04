@@ -17,22 +17,76 @@ TM通过维护XID文件来维护事务的状态，并提供接口供其他模块
 #### 2.1.1.xid文件的定义
 ![img.png](img.png)
 xid文件的前8个字节，记录事务的个数，事务xid的状态记录在(xid - 1) + 8字节处，每个事务的状态由由一个字节表示，状态分为3种，0代表活跃状态，1代表提交状态，2代表丢弃状态。
-![img.png](img_1.png)
+```java
+  // 事务的三种状态
+  private static final byte FIELD_TRAN_ACTIVE = 0;
+  private static final byte FIELD_TRAN_COMMITTED = 1;
+  private static final byte FIELD_TRAN_ABORTED = 2;
+```
 xid是从1开始的，而xid为0为超级事务，当一些操作想在没有申请事务的情况下进行，那么可以将操作的XID设置为0。XID为0的事务的状态永远是committed。
 
 TM提供了一些接口供其他模块调用，用来创建事务和查询事务状态的:
-![img_2.png](img_2.png)
+```java
+  /**开启事务*/
+  long begin();
+
+  /**提交事务*/
+  void commit(long xid);
+
+  /**丢弃事务(也可以说是回滚)*/
+  void abort(long xid);
+
+  boolean isActive(long xid);
+
+  boolean isCommitted(long xid);
+
+  boolean isAborted(long xid);
+
+  /** 用于关闭文件通道和文件资源*/
+  void close();
+```
 #### 2.1.2.实现
 整体上所有的方法都是围绕xid文件进行操作的，在这里为了使文件读取更加方便使用的是NIO的FileChannel,每次开启一个事务，xidCounter就会+1，
 并且会更新到文件头，来确保其数量正确，并且每次开启一个事务，都会立即刷回到磁盘，防止崩溃。
-![img_5.png](img_5.png)
+```java
+  @Override
+  public long begin() {
+    counterLock.lock();
+    try {
+      long xid = xidCounter + 1;
+      updateXID(xid, FIELD_TRAN_ACTIVE);
+      incrXIDCounter();
+      return xid;
+    } finally {
+     counterLock.unlock();
+    }
+  }
+```
 
 在创建TransactionManager时，会通过checkXidCounter来判断是否合法。校验方式的话，就是先读取文件头的
 8字节来得到其事务的个数，并且可以计算出文件的长度，如果不同则认为XID文件不合法。
 
 而事务的状态则是可以通过xid，来反推出它的位置，读取这个位置的数据，进行判断。
-![img_3.png](img_3.png)
-![img_4.png](img_4.png)
+```java
+  // 检测XID事务是否处于status状态
+  private boolean checkXID(long xid, byte status) {
+    long offset = getXidPosition(xid);
+    ByteBuffer buf = ByteBuffer.wrap(new byte[XID_FIELD_SIZE]);
+    try {
+      fc.position(offset);
+      fc.read(buf);
+    } catch (IOException e) {
+      Panic.panic(e);
+    }
+    return buf.array()[0] == status;
+  }
+
+  // 根据事务xid取得其在xid文件对应的位置
+  private long getXidPosition(long xid) {
+    return LEN_XID_HEADER_LENGTH + (xid - 1) * XID_FIELD_SIZE;
+  }
+
+```
 ### 2.2.计数缓存和共享内存
 MYDB中最底层的模块——DataManager;
 > DM直接管理数据库DB文件和日志文件。DM的主要职责有:1)分页管理DB文件，并进行缓存;2)
@@ -78,41 +132,159 @@ DM的功能总结下来就是两点:上层模块和文件系统之间的一个�
 
 AbstractCache<T>是一个抽象类，内部有两个方法，留给实现类实现具体的操作，就是设计模式中的
 模板模式，如果某一层想实现缓存功能，只需要实现父类的两个抽象方法即可。
-![img_6.png](img_6.png)
+```java
+  /**
+   * 当资源被驱逐时的写回行为
+   * @param obj
+   * @throws Exception
+   */
+  protected abstract void releaseForCache(T obj);
+
+
+  /**
+   * 当资源不在缓存时的获取行为
+   * @param key
+   * @return
+   * @throws Exception
+   */
+  protected abstract T getForCache(long key) throws  Exception;
+```
 由于是引用计数，除了必需的缓存功能，也需要维护一个计数。另外，在多线程情况下，要记录
 此时是否有其他线程在从数据的资源中获取。因此，需要维护这三个map。
-![img_7.png](img_7.png)
+```java
+  private HashMap<Long, T> cache; // 实际缓存的数据
 
+  private HashMap<Long, Integer> references; // 元素的引用个数
+
+  private HashMap<Long, Boolean> getting; // 是否正在从数据库获取某资源
+```
 
 具体的获取资源的过程是这样的，首先会进入一个死循环，来无限次尝试从缓存里获取。
 第一步，判断是否有其他资源正在从资源中进行获取，如果有，那么等待1s后，再过来看看。
-![img_8.png](img_8.png)
+```java
+    while (true) {
+      lock.lock();
+      if (getting.containsKey(key)) {
+        // 请求的资源正在被其他线程获取
+        lock.unlock();
+        try {
+          Thread.sleep(1);
+        } catch (InterruptedException e) {
+          e.printStackTrace();
+          continue;
+        }
+        continue;
+      }
+```
 
 第二步，如果资源已经在缓存中了，那么直接获取并返回，并且给获取的资源的计数器+1.
-![img_9.png](img_9.png)
+```java
+   if (cache.containsKey(key)) {
+     // 资源在缓存中，直接返回
+     T obj = cache.get(key);
+     references.put(key, references.get(key) + 1);
+     lock.unlock();
+     return obj;
+   }
+```
 
 第三步，如果到了这里，则说明需要从数据源中获取，在getting中记录，并count++;
-![img_10.png](img_10.png)
+```java
+   // 尝试获取该资源
+   if (maxResources > 0 && count == maxResources) {
+     lock.unlock();
+     throw Error.CacheFullException;
+   }
+   count++;
+   getting.put(key, true);
+   lock.unlock();
+   break;
+```
 
 第四步，获取操作，获取成功的话，则将数据放到cache中，并从getting中移除，
 并在reference中记录引用次数。
-![img_11.png](img_11.png)
+```java
+   T obj = null;
+   try {
+     obj = getForCache(key);
+   } catch (Exception e) {
+     lock.lock();
+     count--;
+     getting.remove(key);
+     lock.unlock();
+     throw e;
+   }
+
+   lock.lock();
+   getting.remove(key);
+   cache.put(key, obj);
+   references.put(key, 1);
+   lock.unlock();
+
+   return obj;
+```
 
 **release()操作**
 
 释放操作比较简单，从reference中减1，如果减到0了，那么就需要刷回数据源，并删除缓存中
 的相关结构了。
-![img_12.png](img_12.png)
+```java
+  protected void release(long key){
+    lock.lock();
+    try {
+      int ref = references.get(key) - 1;
+      if (ref == 0) {
+        T obj = cache.get(key);
+        releaseForCache(obj);
+        references.remove(key);
+        cache.remove(key);
+        count--;
+      } else {
+        references.put(key, ref);
+      }
+    } finally {
+      lock.unlock();
+    }
+  }
+```
 
 缓存中，应该有一个安全关闭的功能，在关闭时，将缓存中的所有资源强行回源。
-![img_13.png](img_13.png)
+```java
+ protected void close() {
+   lock.lock();
+   try {
+     Set<Long> keys = cache.keySet();
+     for (long key :keys) {
+       // 这里关闭，写回资源的时候，无论是否外面引用，都会移除缓存，
+       // 如果references == 0,那么就会刷回数据源；否则，直接移除。
+       release(key);
+       references.remove(key);
+       cache.remove(key);
+     }
+   } finally {
+     lock.unlock();
+   }
+ }
+```
 
 #### 2.3.3.共享内存
 如果要在内存中更新数据，那么就要找到对应的位置进行修改，而java中执行类似
 subArray的操作的时候，只会在底层进行一个复制，无法共用同一个内存。
 
 因此，有一个SubArray类，来规定这个数据的可使用范围。
-![img_14.png](img_14.png)
+```java
+public class SubArray {
+  public byte[] raw;
+  public int start;
+  public int end;
+
+  public SubArray(byte[] raw, int start, int end) {
+    this.raw = raw;
+    this.start = start;
+    this.end = end;
+  }
+}
+```
 ### 2.3.数据页的缓存与管理
 这里主要是DM模块向下对文件系统的抽象部分。DM将文件系统抽象成页面，每次对
 文件系统的读写都是以页面为单位的。同样，从文件系统读进来也是以页面为单位进行缓存的。
@@ -126,20 +298,112 @@ subArray的操作的时候，只会在底层进行一个复制，无法共用同
 有所区别。
 
 定义一个页面如下：
-![img_15.png](img_15.png)
+```java
+public class PageImpl implements Page{
+
+
+  private int pageNumber;
+
+  private byte[] data;
+
+  private boolean dirty;
+
+  private Lock lock;
+
+
+  // 这里Page的实现类有一个pageCache的引用，是为了方便缓存的获取和释放
+  private PageCache pc;
+```
 其中，pageNumber为页面的页号，该页号从1开始。data就是该数据页实际包含
 的字节数据。dirty标志着这个页面是否是脏页面，在缓存驱逐的时候，脏页面需要
 被写回磁盘。
 
 定义页面缓存的接口如下：
-![img_16.png](img_16.png)
+```java
+public interface PageCache {
+
+  public static final int PAGE_SIZE = 1 << 13;  // 默认页面大小为8k
+
+  /**新建页面*/
+  int newPage(byte[] initData);
+  /**根据页号获取页面*/
+  Page getPage(int pgNo) throws Exception;
+  /**关闭页面*/
+  void close();
+  /**释放页面*/
+  void release(Page page);
+
+
+  /**设置最大页，用于截断文件*/
+  void truncateByPgNo(int maxPgNo);
+  /**获取页面数量*/
+  int getPageNumber();
+  /**刷回Page*/
+  void flushPage(Page pg);
+```
 页面缓存的具体实现类，需要继承抽象缓存框架，并且实现`getForCache()`和
 `releaseForCache()`两个抽象方法。由于这里数据源就是文件系统，`getForCache`
 直接从文件中读取，并包裹成Page即可；
-![img_17.png](img_17.png)
+```java
+  /**
+   * 根据pageNumber从数据库文件中读取页数据，并包裹成Page
+   * @param key
+   * @return
+   * @throws Exception
+   */
+  @Override
+  protected Page getForCache(long key) throws Exception {
+    int pgNo = (int)key;
+    long offset = PageCacheImpl.pageOffset(key);
+
+    ByteBuffer buf = ByteBuffer.allocate(PAGE_SIZE);
+    fileLock.lock();
+    try {
+      fc.position(offset);
+      fc.read(buf);
+    } catch (IOException e) {
+      Panic.panic(e);
+    }
+    fileLock.unlock();
+    return new PageImpl(pgNo, buf.array(), this);
+  }
+```
 而`releaseForCache()`驱逐页面时，也只需要根据页面是否是脏页，来决定
 是否需要写回文件系统。
-![img_18.png](img_18.png)
+```java
+ /**
+   * 将脏页刷新到磁盘中
+   * @param pg
+   */
+  @Override
+  protected void releaseForCache(Page pg) {
+    if (pg.isDirty()) {
+      flush(pg);
+      pg.setDirty(false);
+    }
+  }
+
+  /**
+   * 用于将页面刷新到文件磁盘
+   * @param pg
+   */
+  private void flush(Page pg) {
+    int pgNo = pg.getPageNumber();
+    long offset = pageOffset(pgNo);
+
+    fileLock.lock();
+    try {
+      ByteBuffer buf = ByteBuffer.wrap(pg.getData());
+      fc.position(offset);
+      fc.write(buf);
+      fc.force(false);
+    } catch (IOException e) {
+      Panic.panic(e);
+    } finally {
+      fileLock.unlock();
+    }
+  }
+```
 从这里可以看出来，同一条数据是不允许跨页存储的。这意味着，单条数据的大小
 不能超过数据库页面的大小。
 #### 2.3.2.数据页管理
@@ -154,24 +418,130 @@ subArray的操作的时候，只会在底层进行一个复制，无法共用同
 如果是异常关闭，就需要执行数据的恢复流程(通过日志进行恢复).
 
 启动时设置初始字节：
-![img_19.png](img_19.png)
+```java
+  public static void setVcOpen(Page pg) {
+    pg.setDirty(true);
+    setVcOpen(pg.getData());
+  }
+
+  private static void setVcOpen(byte[] raw) {
+    System.arraycopy(RandomUtil.randomBytes(LEN_VC), 0, raw, OF_VC, LEN_VC);
+  }
+```
 关闭时拷贝字节：
-![img_20.png](img_20.png)
+```java
+  public static void setVcClose(Page pg) {
+    pg.setDirty(true);
+    setVcClose(pg.getData());
+  }
+
+  private static void setVcClose(byte[] raw) {
+    System.arraycopy(raw, OF_VC, raw, OF_VC + LEN_VC, LEN_VC);
+  }
+```
 启动时，校验字节：
-![img_21.png](img_21.png)
+```java
+  /**
+   * 如果是正常关闭的话，那末100～107和108～115字节的字节数组应该是一样的，如果不是的话，则说明没有正常关闭，需要进行恢复操作
+   * @param pg
+   * @return
+   */
+  public static boolean checkVc(Page pg) {
+    return checkVc(pg.getData());
+  }
+
+  private static boolean checkVc(byte[] raw) {
+    return Arrays.equals(Arrays.copyOfRange(raw, OF_VC, OF_VC + LEN_VC),
+                         Arrays.copyOfRange(raw, OF_VC + LEN_VC, OF_VC + 2 * LEN_VC));
+  }
+```
 ##### 2.3.2.2.普通页
 MYDB在普通数据页的管理比较简单。一个普通页面以一个2字节无符号数起始，表示
 这一页的空闲位置的偏移。剩下的部分都是实际存储的数据。
 ![img_38.png](img_38.png)
 所以对普通页的管理，基本都是围绕对FSO(Free Space Offset)进行的。例如
 向页面插入数据：
-![img_22.png](img_22.png)
+```java
+  /**
+   * 将raw插入pg中，返回插入位置
+   * @param pg
+   * @param raw
+   * @return
+   */
+  public static short insert(Page pg, byte[] raw) {
+    pg.setDirty(true);
+    short offset = getFSO(pg.getData());
+    System.arraycopy(raw, 0, pg.getData(), offset, raw.length);
+    setFSO(pg.getData(), (short) (offset + raw.length));
+    return offset;
+  }
+
+```
 在写入之前获取FSO，来确定写入的位置，并在写入后更新FSO。FSO的操作如下：
-![img_23.png](img_23.png)
+```java
+ /**
+   * 设置空闲位置的偏移量
+   * @param raw
+   * @param ofData
+   */
+  private static void setFSO(byte[] raw, short ofData) {
+    System.arraycopy(Parser.short2Byte(ofData), 0, raw, OF_FREE, OF_DATA);
+  }
+
+  /**
+   * 获得该页空闲位置的偏移量
+   * @param pg
+   * @return
+   */
+  public static short getFSO(Page pg) {
+    return getFSO(pg.getData());
+  }
+
+  private static short getFSO(byte[] raw) {
+    return Parser.parseShort(Arrays.copyOfRange(raw, OF_FREE, OF_DATA));
+  }
+
+  /**
+   * 获得页面的空闲空间大小
+   * @param pg
+   * @return
+   */
+  public static int getFreeSpace(Page pg) {
+    return PageCache.PAGE_SIZE - (int)getFSO(pg.getData());
+  }
+
+```
 其次，PageX中有两个需要用到的函数是`recoverInsert()`和`recoverUpdate()`
 用于在数据库崩溃后重新打开时，恢复例程直接插入数据以及修改数据使用。(日志恢复中
 会使用到)
-![img_24.png](img_24.png)
+```java
+ /**
+   * 将raw插入pg中的offset位置，并将pg的offset设置为较大的offset
+   * @param pg
+   * @param raw
+   * @param offset
+   */
+  public static void recoverInsert(Page pg, byte[] raw, short offset) {
+    pg.setDirty(true);
+    System.arraycopy(raw, 0, pg.getData(), offset, raw.length);
+
+    short rawFSO = getFSO(pg.getData());
+    if (rawFSO < offset + raw.length) {
+      setFSO(pg.getData(), (short) (offset + raw.length));
+    }
+  }
+
+  /**
+   * 将raw插入pg的offset位置，不更新空闲位置的偏移量
+   * @param pg
+   * @param raw
+   * @param offset
+   */
+  public static void recoverUpdate(Page pg, byte[] raw, short offset) {
+    pg.setDirty(true);
+    System.arraycopy(raw, 0, pg.getData(), offset, raw.length);
+  }
+```
 ### 2.4.日志文件与恢复策略
 MYDB提供了崩溃后的数据恢复功能。DM层在每次对底层数据操作时，都会记录一条日志
 到磁盘上。在数据库崩溃之后，再次启动时，可以根据日志的内容，恢复数据文件，保证其一致性。
@@ -189,20 +559,124 @@ MYDB提供了崩溃后的数据恢复功能。DM层在每次对底层数据操�
 其中，Size是一个四字节整数，标识了Data段的字节数。CheckSum则是该条日志的校验和。
 
 单条日志的校验和，其实就是通过一个指定的种子实现的。
-![img_29.png](img_29.png)
+```java
+  private int calCheckSum(int xCheck, byte[] log) {
+    for (byte b : log) {
+      xCheck = xCheck * SEED + b;
+    }
+    return xCheck;
+  }
+```
 这样，对所有日志求出校验和，求和就能得到日志文件的校验和了。
 
 Logger被实现成迭代器模式，通过`next()`方法，不断地从文件读出下一条日志，并将
 其中的Data解析出来并返回。`next()`方法的实现主要依赖`internNext()`，大致如下，其中
 position是当前日志文件读到的位置偏移。
-![img_30.png](img_30.png)
+```java
+private byte[] internNext() {
+    // 这个position是应该从第一条日志，也就是position=4的时候开始计算,在rewind()方法中验证了这一点
+    if (position + OF_DATA >= fileSize) {
+      return null;
+    }
+    // 读取size
+    ByteBuffer tmp = ByteBuffer.allocate(4);
+    try {
+      fc.position(position);
+      fc.read(tmp);
+    } catch (IOException e) {
+      Panic.panic(e);
+    }
+    int size = Parser.parseInt(tmp.array());
+    if (position + size + OF_DATA > fileSize) {
+      return null;
+    }
+    ByteBuffer buf = ByteBuffer.allocate(OF_DATA + size);
+    try {
+      fc.position(position);
+      fc.read(buf);
+    } catch (IOException e) {
+      Panic.panic(e);
+    }
+
+    byte[] log = buf.array();
+    int checkSum1 = calCheckSum(0, Arrays.copyOfRange(log, OF_DATA, log.length)); // 根据data计算出校验值
+    int checkSum2 = Parser.parseInt(Arrays.copyOfRange(log, OF_CHECKSUM, OF_DATA)); // 再取出日志中的校验值
+    if (checkSum1 != checkSum2) {
+      return null;
+    }
+    position += log.length;
+    return log;
+  }
+```
 在打开一个日志文件时，需要首先校验日志文件的XCheckSum,并移除文件尾部
 可能存在的BadTail,由于BadTail该条日志尚未写入完成，文件的校验和也就不会
 包含该日志的校验和，去掉BadTail即可保证日志文件的一致性。
-![img_31.png](img_31.png)
+```java
+private void checkAndRemoveTail() {
+    rewind();
+
+    int xCheck = 0;
+    while (true) {
+      byte[] log = internNext();
+      if (log == null) break;
+      xCheck = calCheckSum(xCheck, log);
+    }
+    if (xCheck != xCheckSum) {
+      Panic.panic(Error.BadXidFileException);
+    }
+
+    try {
+      truncate(position); // 截断后面的坏的日志
+    } catch (Exception e) {
+      Panic.panic(e);
+    }
+    try {
+      file.seek(position);
+    } catch (IOException e) {
+      Panic.panic(e);
+    }
+    rewind();
+  }
+```
 向日志文件写入日志时，也是首先将数据包裹成日志格式，写入文件后，再更新
 文件的校验和，更新校验和时，会刷新缓存区，保证内容写入磁盘。
-![img_36.png](img_36.png)
+```java
+  public void log(byte[] data) {
+   byte[] log = wrap(data);
+   ByteBuffer buf = ByteBuffer.wrap(log);
+   lock.lock();
+   try {
+     fc.position(fc.size());
+     fc.write(buf);
+   } catch (IOException e) {
+      Panic.panic(e);
+   } finally {
+     lock.unlock();
+   }
+     updateXCheckSum(log);
+  }
+
+/**
+ * 更新总的日志文件的checkSum
+ * @param log
+ */
+  private void updateXCheckSum(byte[] log) {
+   this.xCheckSum = calCheckSum(this.xCheckSum, log);
+   try {
+    fc.position(0);
+    fc.write(ByteBuffer.wrap(Parser.int2Byte(xCheckSum)));
+   } catch (IOException e) {
+     Panic.panic(e);
+   }
+ }
+
+  private byte[] wrap(byte[] data) {
+   byte[] checkSum = Parser.int2Byte(calCheckSum(0, data));
+   byte[] size = Parser.int2Byte(data.length);
+   return Bytes.concat(size, checkSum, data);
+  }
+
+```
 #### 2.4.2.恢复策略
 DM为上层模块，提供了两种策略，分别是插入新数据(I)和更新现有数据(U)，
 删除数据在VM层进行实现。
@@ -263,15 +737,129 @@ MYDB中没有真正的删除操作，对于插入操作的undo，只是将其中
 在恢复后，数据库就会恢复到所有已完成事务结束，所有未完成事务尚未开始的状态。
 ##### 2.4.2.3.实现
 首先规定两种日志的格式：
-![img_41.png](img_41.png)
+```java
+  private static final byte LOG_TYPE_INSERT = 0; // 插入日志的标识符
+
+  private static final byte LOG_TYPE_UPDATE = 1; // 更新日志的标识符
+```
 ![img_43.png](img_43.png)
 跟原理中描述的类似，recover过程主要也是两步：重做所有已完成事务，撤销所有
 未完成事务：
-![img_44.png](img_44.png)
-![img_45.png](img_45.png)
+```java
+  private static void redoTransactions(TransactionManager tm, Logger lg, PageCache pc) {
+    lg.rewind();
+    while(true) {
+      byte[] log = lg.next();
+      if (log == null) break;
+      if (isInsertLog(log)) {
+          InsertLogInfo li = parseInsertLog(log);
+          long xid = li.xid;
+          if (!tm.isActive(xid)) {
+            doInsertLog(pc, log, REDO);
+          }
+      } else {
+        UpdateLogInfo xi = parseUpdateLog(log);
+        long xid = xi.xid;
+        if (!tm.isActive(xid)) {
+          doUpdateLog(pc, log, REDO);
+        }
+      }
+    }
+  }
+
+  private static void undoTransactions(TransactionManager tm, Logger lg, PageCache pc) {
+    Map<Long, List<byte[]>> logCache = new HashMap<>();
+    lg.rewind();
+    while (true) {
+      byte[] log = lg.next();
+      if (log == null) break;
+   
+      if (isInsertLog(log)) {
+         InsertLogInfo li = parseInsertLog(log);
+         long xid = li.xid;
+         if (tm.isActive(xid)) {
+         if (!logCache.containsKey(xid)) {
+           logCache.put(xid, new ArrayList<>());
+         }
+        logCache.get(xid).add(log);
+       }
+      } else {
+         UpdateLogInfo xi = parseUpdateLog(log);
+         long xid = xi.xid;
+         if (tm.isActive(xid)) {
+         if (!logCache.containsKey(xid)) {
+           logCache.put(xid, new ArrayList<>());
+         }
+         logCache.put(xid, new ArrayList<>());
+       }
+      }
+    }
+ 
+    // 对所有的active log进行倒序undo
+    for (Entry<Long, List<byte[]>> entry : logCache.entrySet()) {
+      List<byte[]> logs = entry.getValue();
+      for (int i = logs.size() - 1; i >= 0; i--) {
+      byte[] log = logs.get(i);
+      if (isInsertLog(log)) {
+         doInsertLog(pc, log, UNDO);
+      } else {
+         doUpdateLog(pc, log, UNDO);
+      }
+    }
+  }
+ }
+```
 
 updateLog和insertLog的重做和撤销处理，分别合成一个方法来实现。
-![img_46.png](img_46.png)
+```java
+  private static void doUpdateLog(PageCache pc, byte[] log, int flag) {
+    int pgNo;
+    short offset;
+    byte[] raw;
+    if (flag == REDO) {
+      UpdateLogInfo xi = parseUpdateLog(log);
+      pgNo = xi.pgNo;
+      offset = xi.offset;
+      raw = xi.newRaw;
+    } else {
+      UpdateLogInfo xi = parseUpdateLog(log);
+      pgNo = xi.pgNo;
+      offset= xi.offset;
+      raw = xi.oldRaw;
+    }
+    Page pg = null;
+    try {
+      pg = pc.getPage(pgNo);
+    } catch (Exception e) {
+      Panic.panic(e);
+    }
+    try {
+      PageX.recoverUpdate(pg, raw, offset);
+    } finally {
+      pg.release();
+    }
+  }
+```
+```java
+  private static void doInsertLog(PageCache pc, byte[] log, int flag) {
+    InsertLogInfo li = parseInsertLog(log);
+    Page pg = null;
+    try {
+      pg = pc.getPage(li.pgNo);
+    } catch (Exception e) {
+      Panic.panic(e);
+    }
+    try {
+      if (flag == REDO) {
+        PageX.recoverInsert(pg, li.raw, li.offset);
+      } else {
+        DataItem.setDataItemRawInvalid(li.raw);
+      }
+    } finally {
+      pg.release();
+    }
+  }
+```
 ![img_47.png](img_47.png)
 注意，`doInsertLog()`方法中的删除，使用的是` DataItem.setDataItemRawInvalid(li.raw);`,
 大致的作用，就是将该条DataItem的有效位设置为无效，来进行逻辑删除。
