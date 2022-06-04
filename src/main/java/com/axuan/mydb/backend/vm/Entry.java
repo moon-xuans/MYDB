@@ -61,8 +61,7 @@ public class Entry {
     dataItem.rLock();
     try {
       SubArray sa = dataItem.data();
-      // 这里要减去XMIN,XMAX的长度，但是不知道和那边减去OF_DATA有什么区别
-      // 我的理解是XMIN，XMAX也属于那边Data的一部分，不过这里只要有效数据
+      // XMIN，XMAX也属于DataItem的一部分，不过这里只要真实数据
       byte[] data = new byte[sa.end - sa.start - OF_DATA];
       System.arraycopy(sa.raw, sa.start + OF_DATA, data, 0, data.length);
       return data;

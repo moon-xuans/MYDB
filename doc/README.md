@@ -860,7 +860,6 @@ updateLog和insertLog的重做和撤销处理，分别合成一个方法来实�
     }
   }
 ```
-![img_47.png](img_47.png)
 注意，`doInsertLog()`方法中的删除，使用的是` DataItem.setDataItemRawInvalid(li.raw);`,
 大致的作用，就是将该条DataItem的有效位设置为无效，来进行逻辑删除。
 ### 2.5.页面索引与DM的实现
@@ -1187,4 +1186,614 @@ DataManager正常关闭时，需要执行缓存和日志的关闭流程，并且
 
 由此看来，2PL确实保证了调度序列的可串行化，但是不可避免地导致了事务的相互阻塞，
 甚至可能导致死锁。MYDB为了提供事务处理的效率，降低阻塞概率，实现了MVCC。
+##### 2.6.1.2.MVCC
+
+DM层向上层提供了数据项(Data Item)的概念，VM通过管理所有的数据项，向上提供了记录(Entry)的概念。上层模块通过VM操作数据的最小单位，就是记录。VM在其内部，为每个记录，维护了多个版本(Version)。每当上层模块对某个记录进行修改时，VM就会为这个记录创建一个新的版本。
+
+MYDB通过MVCC，降低了事务的阻塞概率。譬如，T1想要更新记录X的值，于是T1需要首先获取X的锁，接着更新，也就是创建了新的X的版本，假设为x3。假设T1还没有释放X的锁，T2想要读取X的值，这时候就不会阻塞，MYDB会返回一个较老版本的X，例如x2。这样最后执行的结果，就等价于T2先执行，T1后执行，调度序列依然是可串行化的。如果X没有一个更老的版本，那只能等到T1释放锁了。所以只是降低了概率。
+
+#### 2.6.2.记录的实现
+
+对于一条记录来说，MYDB使用Entry类维护了其结构。虽然理论上，MVCC实现了多版本，但是实现中，VM并没有提供Update操作，对于字段的更新操作由后面实现的表和字段管理(TBM)实现。所以在VM的实现中，一条记录只有一个版本。
+
+一条记录存储在一条Data Item中，所以Entry中保存一个DataItem的引用即可。
+
+```java
+public class Entry {
+
+  private static final int OF_XMIN = 0;
+  private static final int OF_XMAX = OF_XMIN + 8;
+  private static final int OF_DATA = OF_XMAX + 8;
+
+  private long uid;
+  private DataItem dataItem;
+  private VersionManager vm;
+
+  public static Entry loadEntry(VersionManager vm, long uid) throws Exception{
+    DataItem di = ((VersionManagerImpl) vm).dm.read(uid);
+    return newEntry(vm, di, uid);
+  }    
+    
+  public void remove() {
+    dataItem.release();
+  }
+}
+
+```
+
+我们，规定一条Entry中存储的数据格式如下：
+
+![img_1.png](img_1.png)
+![img_2.png](img_2.png)
+XMIN是创建该条记录(版本)的事务编号，而XMAX则是删除该条记录(版本)的事务编号。Data就是这条记录持有的数据。根据这个结构，在创建记录时调用的`wrapEntryRaw()`方法如下:
+
+```java
+public static byte[] wrapEntryRaw(long xid, byte[] data) {
+  byte[] xmin = Parser.long2Byte(xid);
+  byte[] xmax = new byte[8];
+  return Bytes.concat(xmin, xmax, data);
+}
+```
+
+同样，如果要获取记录中持有的数据，也就需要按照这个结构来解析：
+
+```java
+// 以拷贝的形式返回内容
+public byte[] data() {
+  dataItem.rLock();
+  try {
+    SubArray sa = dataItem.data();
+    // XMIN，XMAX也属于DataItem的一部分，不过这里只要真实数据
+    byte[] data = new byte[sa.end - sa.start - OF_DATA];
+    System.arraycopy(sa.raw, sa.start + OF_DATA, data, 0, data.length);
+    return data;
+  } finally {
+    dataItem.rUnLock();
+  }
+}
+```
+
+这里以拷贝的形式返回数据，如果要修改的话，需要对DataItem执行`before()`方法，这个在设置XMAX的值中体现了:
+
+```java
+public void setMax(long xid) {
+  dataItem.before();
+  try {
+    SubArray sa = dataItem.data();
+    System.arraycopy(Parser.long2Byte(xid),0, sa.raw, sa.start + OF_XMAX, 8);
+  } finally {
+    dataItem.after(xid);
+  }
+}
+```
+#### 2.6.3.事务的隔离级别
+
+##### 2.6.3.1.读提交
+
+上面提到，如果一个记录的最新版本被加锁，当另一个事务想要修改或读取这条记录时，MYDB就会返回一个较旧的版本的数据。这时就可以认为，最新的被加锁的版本，对于另一个事务来说，是不可见的。这就是版本可见性。
+
+版本的可见性与事务的隔离度是相关的。MYDB支持的最新的事务隔离程度，是“读提交”(Read Committed)，即事务在读取数据时，只能读取已经提交事务产生的数据。保证最低的读提交，就是为了防止级联回滚与commit语义冲突。
+
+MYDB实现读提交，为每个版本维护了两个变量，就是上面提到的XMIN和XMAX：
+
+> XMIN:创建该版本的事务编号
+>
+> XMAX:删除该版本的事务编号
+
+XMIN应当在版本创建时填写，而XMAX则在版本被删除，或者有新版本出现时填写。
+
+XMAX这个变量，也就解释了为什么DM层不提供删除操作，当想删除一个版本时，只需要设置其XMAX，这样这个版本对每一个XMAX之后的事务都是不可见的，也就等价于删除了。
+
+因此，在读提交下，版本对事务的可见性逻辑如下：
+
+```tex
+(XMIN == Ti and // 由Ti创建且
+	XMAX == null // 还未被删除
+)
+or 			// 或
+(CMIN is committed and 	// 由一个已提交的事务创建且
+	(XMAX == NULL or // 尚未删除或
+	(XMAX != Ti and XMAX is not committed) // 由一个未提交的事务删除
+))
+```
+
+若条件为true，则版本对Ti可见。那么获取Ti适合的版本，只需要从最新版本开始，以此向前检查可见性，如果为true，就可以直接返回。
+
+以下方法判断某个记录对事务t是否可见:
+
+```java
+private static boolean readCommitted(TransactionManager tm, Transaction t, Entry e) {
+  long xid = t.xid;
+  long xmin = e.getXmin();
+  long xmax = e.getXmax();
+  if (xmin == xid && xmax == 0) return true;
+
+  if (tm.isCommitted(xmin)) {
+    if (xmax == 0) return true;
+    if (xmax != xid) {
+      if (!tm.isCommitted(xmax)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+```
+
+这里的Transaction结构只提供了一个XID。
+
+##### 2.6.3.2.可重复读
+
+读提交的话，无法避免不可重复读和幻读。因此这里，有另一种隔离级别：可重复读。
+
+我们规定：
+
+> 事务只能读取它开始时，就已经结束的那些事务产生的数据版本
+
+这条规定，增加于，事务需要忽略:
+
+> 1.在本事务后开始的事务的数据；
+>
+> 2.本事务开始时还是active状态的事务的数据。
+
+对于第一条，只需要比较事务ID，即可确定。而对于第二条，则需要在事务Ti开始时，记录下当前活跃的所有事务SP(Ti),如果记录的某个版本，XMIN在SP(Ti)中，也应当对Ti不可见。
+
+于是，可重复读的逻辑判断如下:
+
+```tex
+(XMIN == Ti and  // 由Ti创建且
+	(XMAX == NULL or 	// 尚未被删除
+))
+or 	// 或
+(XMIN is committed and 	// 由一个已提交的事务创建且
+XMIN < XID and  // 这个事务小于Ti且
+XMIN is not in SP(Ti) and // 这个事务在Ti开始前提交且
+	(XMAX == NULL or 	// 尚未被删除或
+		(XMAX != Ti and  // 由其他事务删除但是
+			(XMAX is not committed or // 这个事务尚未被提交或
+			XMAX > Ti or // 这个事务在Ti开始之后才开始或
+			XMAX is in SP(Ti) // 这个事务在Ti开始前还未被提交
+))))
+
+```
+
+因此，需要提供一个结构，来抽象事务，以保存快照数据:
+
+```java
+public class Transaction {
+  public long xid;
+  public int level;
+  public Map<Long, Boolean> snapshot;
+  public Exception err;
+  public boolean autoAborted;
+
+  public static Transaction newTransaction(long xid, int level, Map<Long, Transaction> active) {
+    Transaction t = new Transaction();
+    t.xid = xid;
+    t.level = level;
+    if (level != 0) {
+      t.snapshot = new HashMap<>();
+      for (Long x : active.keySet()) {
+        t.snapshot.put(x, true);
+      }
+    }
+    return t;
+  }
+
+  public boolean isInSnapshot(long xid) {
+    if (xid == TransactionManagerImpl.SUPER_XID) {  // 如果是超级事务，直接返回false。因为超级事务默认committed
+      return false;
+    }
+    return snapshot.containsKey(xid);
+  }
+
+}
+```
+
+构造方法中的active，保存着当前所有active的事务。于是，可重复读的隔离级别下，一个版本是否对事务可见的判断如下:
+
+```java
+private static boolean repeatableRead(TransactionManager tm, Transaction t, Entry e) {
+  long xid = t.xid;
+  long xmin = e.getXmin();
+  long xmax = e.getXmax();
+  if (xmin == xid && xmax == 0) return true;
+
+  if (tm.isCommitted(xmin) && xmin < xid && !t.isInSnapshot(xmin)) {
+    if (xmax == 0) return true;
+    if (xmax != xid) {
+      if (!tm.isCommitted(xmax) || xmax > xid || t.isInSnapshot(xmax)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+```
+### 2.6.记录的版本与事务隔离
+
+这一节主要是解决MVCC可能导致的版本跳跃问题，和避免2PL导致的死锁，将其进行整合。
+
+#### 2.6.1.版本跳跃问题
+
+MYDB在撤销或者回滚事务：只需要将这个事务标记为aborted即可。之前对可见性的判断，每个事务只能看到其他committed的事务所产生的数据，一个aborted事务产生的数据，就不会对其他事务产生任何影响了，也就相当于，这个事务不曾存在过。
+
+版本跳跃问题，举个例子，假设X最初只有x0版本，T1和T2都是可重复读的隔离级别:
+
+```tex
+T1 begin
+T2 begin
+R1(X) // T1读取X0
+R2(X) // T2读取X0
+U1(X) // T1将X更新到X1
+T1 commit
+U2(X) // T2将X更新到X2
+T2 commit
+```
+
+这种情况实际运行起来是没有问题的，但是逻辑上不太正确。T1将X从X0更新为了X1，这是没错的。但是T2则是将X从X0更新成了X2，跳过了X1版本。
+
+读提交是允许版本跳跃的，而可重复读是不允许版本跳跃的。解决版本跳跃的思路：如果Ti需要修改X,而X已经被Ti不可见的事务Tj修改了，那么要求Ti回滚。
+
+对于Ti不可见的Tj，有两种情况:
+
+> 1.XID(Tj) > XID(Ti)
+>
+> 2.Tj in SP(Ti)
+
+于是版本跳跃的检查就是，取出要修改的数据X的最新提交版本，并检查该最新版本的创建者对当前事务是否可见:
+
+```java
+public static boolean isVersionSkip(TransactionManager tm, Transaction t, Entry e) {
+  long xmax = e.getXmax();
+  if (t.level == 0) {
+    return false; // 如果是读已提交的情况下，则会忽略版本跳跃的问题，直接返回false即可
+  } else {
+    return tm.isCommitted(xmax) && (xmax > t.xid || t.isInSnapshot(xmax));
+  }
+}
+```
+
+#### 2.6.2.死锁检测
+
+之前提到2PL会阻塞事务，直至持有锁的线程释放锁。可以将这种等待关系抽象成有向边，例如Tj在等待Ti,就可以表示为Tj->Ti。这样，无数有向边就可以形成一个图(不一定是连通图)。检测死锁也就简单了，只需要查看这个图中是否有环即可。
+
+MYDB使用一个LockTable对象，在内存中维护这张图。维护结构如下:
+
+```java
+public class LockTable {
+
+  private Map<Long, List<Long>> x2u;  // 某个XID已经获得的资源的UID列表
+  private Map<Long, Long> u2x;        // UID被某个XID持有
+  private Map<Long, List<Long>> wait; // 正在等待UID的XID列表
+  private Map<Long, Lock> waitLock;   // 正在等待资源的XID的锁
+  private Map<Long, Long> waitU;      // XID正在等待的UID
+  private Lock lock;
+...
+}
+```
+
+在每次出现等待的情况时，就尝试向图中增加一条边，并进行死锁检测。如果检测到死锁，就撤销这条边，不允许添加，并撤销该事务。
+
+```java
+// 不需要等待则返回null，否则返回锁对象
+// 会造成死锁则抛出异常
+public Lock add(long xid, long uid) throws Exception {
+  lock.lock();
+  try {
+    if (isInList(x2u, xid, uid)) { // xid已经获得uid了，因此不需要等待
+      return null;
+    }
+    if (!u2x.containsKey(uid)) { // 说明uid此时并没有被获取，因此可以设置之后，直接获取到，不需要等待
+      u2x.put(uid, xid);
+      putInfoList(x2u, xid, uid);
+      return null;
+    }
+    waitU.put(xid, uid);  // 记录xid在等待uid
+    putInfoList(wait, xid, uid); // 记录在等待uid的xid，感觉这里有点问题，xid和uid位置应该调换一下
+    if (hasDeadLock()) { // 如果存在死锁，就撤销这条边，不允许添加，并撤销该事务
+      waitU.remove(xid);
+      removeFromList(wait, uid, xid);
+      throw Error.DeadLockException;
+    }
+    // 这里是判断没有死锁后，并且uid已经被获取到了，因此需要等待
+    // 设置xid以及对应lock，返回lock
+    Lock l = new ReentrantLock();
+    l.lock();  // 这里加锁返回后，要注意在selectNewXid方法里面，会打开这个锁，才能真正解锁
+    waitLock.put(xid, l);
+    return l;
+
+  } finally {
+    lock.unlock();
+  }
+}
+```
+
+调用add，如果需要等待的话，会返回一个上了锁的Lock对象。调用方在获取到该对象时，需要尝试获取该对象的锁，由此实现阻塞线程的目的，例如：
+
+```java
+l = lt.add(xid, uid); // 如果xid持有uid失败，返回lock，则进行加锁阻塞，等待其释放
+if (l != null) {
+  l.lock();
+  l.unlock();
+}
+```
+
+查找图中是否有环的算法也非常简单，就是一个深搜，需要注意这个图不一定是连通图。思路就是为每个节点设置一个访问戳，都初始化为-1，随后遍历所有节点，以每个非-1的节点作为根进行深搜，并将深搜该连通图中遇到的所有节点都设置为同一个数字，不同的连通图数字不同。这样，如果在遍历某个图时，遇到了之前遍历过的节点，说明出现了环。
+
+```java
+private boolean hasDeadLock() {
+  xidStamp = new HashMap<>();
+  stamp = 1;
+  for (long xid : x2u.keySet()) {
+    Integer s = xidStamp.get(xid);
+    if (s != null && s > 0) {
+      continue;
+    }
+    stamp++;
+    if (dfs(xid)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+private boolean dfs(Long xid) {
+  Integer stp = xidStamp.get(xid);
+  if (stp != null && stp == stamp) { // 遇到之前的标识，则说明死锁了
+    return true;
+  }
+  if (stp != null && stp < stamp) {
+    return false;
+  }
+  xidStamp.put(xid, stamp);
+
+  Long uid = waitU.get(xid); // 得到xid持有的资源uid
+  if (uid == null) return false; // 如果uid为null，则必不可能形成死锁
+  Long x = u2x.get(uid); // 得到持有uid的xid，并继续进行遍历
+  assert x != null;
+  return dfs(x);
+}
+```
+
+在一个事务commit或者abort时，就可以释放所有它持有的锁，并将自身从等待图中删除。
+
+```java
+  public void remove(long xid) {
+    lock.lock();
+    try {
+      List<Long> l = x2u.get(xid);  // 获得这个xid持有的uid
+      if (l != null) {
+        while(l.size() > 0) {
+          Long uid = l.remove(0);  // 从列表的头部开始遍历，进行分配
+          selectNewXid(uid);
+        }
+      }
+      waitU.remove(xid);  // 分配完之后，再移除waitU，说明它不再等待uid了
+      x2u.remove(xid); // 移除xid
+      waitLock.remove(xid); // 移除xid对应的lock
+    } finally {
+      lock.unlock();
+    }
+  }
+```
+
+while循环释放掉这个线程持有的资源的锁，这些资源可以被等待的线程所获取:
+
+```java
+  // 从等待队列中选择一个xid来占用
+  private void selectNewXid(Long uid) {
+    u2x.remove(uid);  // 首先解除uid和xid的绑定关系
+    List<Long> l = wait.get(uid); // 获得等待uid的所有xid列表
+    if (l == null) return;
+    assert l.size() > 0;
+
+    while (l.size() > 0) {
+      long xid = l.remove(0); // 从xid列表的头部开始取
+      if (!waitLock.containsKey(xid)) { // 则说明这个xid已经不再等待这个uid了，可能被commit/abort了
+        continue;
+      } else {
+        u2x.put(uid, xid); // 此时uid被xid持有了
+        Lock lo = waitLock.remove(xid); // 移除xid正在等待的锁
+        waitU.remove(xid); // 移除xid等待uid的关系
+        lo.unlock(); // 解锁
+        break;
+      }
+    }
+    if(l.size() == 0) wait.remove(uid); // 如果已经没有uid的xid了，直接移除
+  }
+```
+
+从List开头开始尝试解锁，是个公平锁。解锁时，将该Lock对象unLock即可，这样业务线程就获取到了锁，就可以继续执行了。
+
+#### 2.6.3.VM的实现
+
+VM层通过VersionManager接口，向上层提供功能，如下：
+
+```java
+public interface VersionManager {
+  byte[] read(long xid, long uid) throws Exception;
+  long insert(long xid, byte[] data) throws Exception;
+  boolean delete(long xid, long uid) throws Exception;
+
+  long begin(int level);
+  void commit(long xid) throws Exception;
+  void abort(long xid);
+}
+```
+
+同时，VM的实现类还被设计为Entry的缓存，需要继承`AbstractCache<Entry>`。需要实获取到缓存和从缓存释放的方法:
+
+```java
+@Override
+protected void releaseForCache(Entry entry) {
+  entry.remove();
+}
+
+@Override
+protected Entry getForCache(long uid) throws Exception {
+  Entry entry = Entry.loadEntry(this, uid);
+  if (entry == null) {
+    throw Error.NullEntryException;
+  }
+  return entry;
+}
+```
+
+`begin()`开启一个事务，并初始化事务的结构，将其存放在activeTransaction中，用于检查和快照使用。
+
+```java
+  @Override
+  public long begin(int level) {
+    lock.lock();
+    try {
+      long xid = tm.begin();
+      Transaction t = Transaction.newTransaction(xid, level, activeTransaction);
+      activeTransaction.put(xid, t);
+      return xid;
+    } finally {
+      lock.unlock();
+    }
+  }
+```
+
+`commit()`方法提交一个事务，主要就是free掉相关的结构，并且释放持有的锁，并修改TM状态:
+
+```java
+  @Override
+  public void commit(long xid) throws Exception {
+    lock.lock();
+    Transaction t = activeTransaction.get(xid);  // 通过xid获取这个事务
+    lock.unlock();
+
+    try {
+      if (t.err != null) {
+        throw t.err;
+      }
+    } catch (NullPointerException n) {
+      System.out.println(xid);
+      System.out.println(activeTransaction.keySet());
+      Panic.panic(n);
+    }
+
+    lock.lock();
+    activeTransaction.remove(xid); // 并从active事务中移除掉
+    lock.unlock();
+
+    lt.remove(xid);  // 既然这个事务已经提交，则去掉在locktable中的关联
+    tm.commit(xid); // 通过tm提交这个事务
+  }
+```
+
+abort事务的方法有两种，手动和自动。手动指的是调用abort()方法，而自动，则是在事务被检测出出现死锁时，会自动撤销回滚事务；或者出现版本跳跃时，也会自动回滚。
+
+```java
+  private void internAbort(long xid, boolean autoAborted) {
+    lock.lock();
+    Transaction t = activeTransaction.get(xid);
+    if (!autoAborted) {
+      activeTransaction.remove(xid);
+    }
+    lock.unlock();
+
+    if (t.autoAborted) return;
+    lt.remove(xid);  // 手动的话，则需要解除locktable的一些关系
+    tm.abort(xid); // 并要通过tm进行abort
+  }
+
+```
+
+`read()`方法读取一个entry，注意判断下可见性即可：
+
+```java
+@Override
+public byte[] read(long xid, long uid) throws Exception {
+  lock.lock();
+  Transaction t = activeTransaction.get(xid); // 读的时候先通过xid获取该事务
+  lock.unlock();
+  if (t.err != null) {
+    throw t.err;
+  }
+  Entry entry = super.get(uid);  // 通过缓存获得entry
+  try {
+    if (Visibility.isVisible(tm,t, entry)) {
+      return entry.data();
+    }else{
+      return null;
+    }
+  } finally {
+    entry.release();
+  }
+}
+```
+
+`insert()`则是将数据包裹成Entry，交给DM插入即可：
+
+```java
+@Override
+public long insert(long xid, byte[] data) throws Exception {
+  lock.lock();
+  Transaction t = activeTransaction.get(xid);
+  lock.unlock();
+  if (t.err != null) {
+    throw t.err;
+  }
+  byte[] raw = Entry.wrapEntryRaw(xid, data);
+  return dm.insert(xid, raw);
+}
+```
+
+`delete()`方法稍微复杂点:
+
+```java
+@Override
+public boolean delete(long xid, long uid) throws Exception {
+  lock.lock();
+  Transaction t = activeTransaction.get(xid); // 获得其事务
+  lock.unlock();
+
+  if (t.err != null) {
+    throw t.err;
+  }
+  Entry entry = super.get(uid);
+  try {
+    if (!Visibility.isVisible(tm, t, entry)) { // 如果不满足可见性，则直接返回false
+      return false;
+    }
+    Lock l = null;
+    try {
+      l = lt.add(xid, uid); // 如果xid持有uid失败，返回lock，则进行加锁阻塞，等待其释放
+    } catch (Exception e) {
+      t.err = Error.ConcurrentUpdateException;
+      internAbort(xid, true);
+      t.autoAborted = true;
+      throw t.err;
+    }
+    if (l != null) {
+      l.lock();
+      l.unlock();
+    }
+
+    if (entry.getXmax() == xid) { // 如果xmax就是它本身，则重复操作，返回false
+      return false;
+    }
+
+    if (Visibility.isVersionSkip(tm, t, entry)) { // 如果存在版本跳跃
+      t.err = Error.ConcurrentUpdateException;
+      internAbort(xid, true); // 则要自己回滚事务
+      t.autoAborted = true;
+      throw t.err;
+    }
+
+    entry.setMax(xid);
+    return true;
+  } finally {
+    entry.release();
+  }
+}
+```
+
+实际上主要是前置的三件事:一是可见性判断，二是获取资源的锁，三是版本跳跃判断。删除的操作只有一个设置XMAX.
+
+
 
