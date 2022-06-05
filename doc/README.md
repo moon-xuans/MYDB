@@ -1795,5 +1795,639 @@ public boolean delete(long xid, long uid) throws Exception {
 
 实际上主要是前置的三件事:一是可见性判断，二是获取资源的锁，三是版本跳跃判断。删除的操作只有一个设置XMAX.
 
+### 2.8.索引管理
 
+IM,即Index Manager,索引管理器，为MYDB提供了基于B+树的聚簇索引。现在MYDB只支持索引查找数据，不支持全表扫描。
+
+IM直接依赖于DM，而没有基于VM。索引的数据被直接插入数据库文件中，而不需要经过版本控制。
+
+#### 2.8.1.二叉树索引
+
+二叉树由一个个Node组成，每个Node都存储一条DataItem中。结构如下:
+
+![img_3.png](img_3.png)
+
+其中LeafFlag标记了该节点是否是叶子节点；KeyNumber为该节点key的个数；SiblingUid是其兄弟节点存储在DM中的UID。后续是穿插的子节点(SonN)和KyeN。最后一个KeyN始终为MAX_VALUE,以此方便查找。
+
+Node类持有了其B+树结构的引用，DataItem的引用和SubArray的引用，用于方便快速修改数据和释放数据。
+
+```java
+public class Node {
+  BPlusTree tree;
+  DataItem dataItem;
+  SubArray raw;
+  long uid;
+ ...
+}
+```
+
+于是生成一个根节点的数据可以写成如下:
+
+```java
+static byte[] newRootRaw(long left, long right, long key) {
+    SubArray raw = new SubArray(new byte[NODE_SIZE], 0, NODE_SIZE);
+
+    setRawIsLeaf(raw, false);
+    setRawNoKeys(raw, 2);
+    setRawSibling(raw, 0);
+    setRawKthSon(raw, left, 0);
+    setRawKthKey(raw, key, 0);
+    setRawKthSon(raw, right, 1);
+    setRawKthKey(raw, Long.MAX_VALUE, 1);
+
+    return raw.raw;
+}
+```
+
+该根节点的初始两个子结点为left和right，初始键值为key.
+
+类似的，生成一个空的根节点数据
+
+```java
+static byte[] newNilRootRaw() {
+  SubArray raw = new SubArray(new byte[NODE_SIZE], 0, NODE_SIZE);
+
+  setRawIsLeaf(raw, true);
+  setRawNoKeys(raw, 0);
+  setRawSibling(raw, 0);
+
+  return raw.raw;
+}
+```
+
+Node类有两个方法，用于辅助B+树做插入和搜索操作，分别是searchNext和leafSearchRange方法。
+
+searchNext寻找对应key的UID,如果找不到，则返回兄弟节点的UID.
+
+```java
+public SearchNextRes searchNext(long key) {
+  dataItem.rLock();
+  try {
+    SearchNextRes res = new SearchNextRes();
+    int noKeys = getRawNoKeys(raw);
+    for (int i = 0; i < noKeys; i++) {
+      long ik = getRawKthKey(raw, i);
+      if (key < ik) {   // 这里我的理解是，只要找到对应的小于key的节点即可，就可以顺着索引寻找下去
+        res.uid  = getRawKthSon(raw, i);
+        res.siblingUid = 0;
+        return res;
+      }
+    }
+    res.uid = 0;
+    res.siblingUid = getRawSibling(raw); // 若没有找到，则返回其兄弟节点
+    return res;
+  } finally {
+    dataItem.rUnLock();
+  }
+}
+```
+
+leafSearchRange方法在当前节点进行范围查找，范围是[LeafKey, rightKey]，这里如果约定rightKey大于等于该节点的最大的key，则还同时返回兄弟节点的UID,方便继续搜索下一个节点。
+
+```java
+public LeafSearchRangeRes leafSearchRange(long leftKey, long rightKey) {
+  dataItem.rLock();
+
+  try {
+    int noKeys = getRawNoKeys(raw);
+    int kth = 0;
+    while (kth < noKeys) {
+      long ik = getRawKthKey(raw, kth);
+      if (ik >= leftKey) {
+        break;
+      }
+      kth++;
+    }
+    ArrayList<Long> uids = new ArrayList<>();
+    while (kth < noKeys) {
+      long ik = getRawKthKey(raw, kth);
+      if (ik <= rightKey) {
+        uids.add(getRawKthSon(raw, kth));
+        kth++;
+      } else {
+        break;
+      }
+    }
+    long siblingUid = 0;
+    if (kth == noKeys) { // 如果说寻找到头了，那末就要返回其兄弟节点，方便继续搜索下一个节点
+      siblingUid = getRawSibling(raw);
+    }
+    LeafSearchRangeRes res = new LeafSearchRangeRes();
+    res.uids = uids;
+    res.siblingUid = siblingUid;
+    return res;
+  } finally {
+    dataItem.rUnLock();
+  }
+}
+```
+
+由于B+树在插入删除时，会动态调整，根节点不是固定节点，于是设置一个bootDataItem，该DataItem中存储了根节点的UID。可以看到，IM在操作DM时，使用的事务都是SUPER_XID;
+
+```java
+public class BPlusTree {
+
+  private long rootUid() {
+    bootLock.lock();
+    try {
+      SubArray sa = bootDataItem.data();
+      return Parser.parseLong(Arrays.copyOfRange(sa.raw, sa.start, sa.start + 8)); // 返回data中的uid
+    } finally {
+      bootLock.unlock();
+    }
+  }
+
+
+  private void updateRootUid(long left, long right, long rightKey) throws Exception {
+    bootLock.lock();
+    try {
+      byte[] rootRaw = Node.newRootRaw(left, right, rightKey);  // 创建了一个新的根节点
+      long newRootUid = dm.insert(TransactionManagerImpl.SUPER_XID, rootRaw); // 插入到dm中
+      bootDataItem.before();
+      SubArray diRaw = bootDataItem.data();
+      System.arraycopy(Parser.long2Byte(newRootUid), 0, diRaw.raw, diRaw.start, 8); // 将根节点的uid记录在diRaw中，相当于更新其rootUid
+      bootDataItem.after(TransactionManagerImpl.SUPER_XID);
+    } finally {
+      bootLock.unlock();
+    }
+  }
+}
+```
+
+IM对上层模块主要提供两种能力：插入索引和搜索节点。
+
+但是这里可能有个问题，IM这里为什么不提供删除索引的能力。当上层模块通过VM删除某个Entry，实际的操作时设置其XMAX。如果不去删除对应索引的话，当后续再次尝试读取该Entry时，是可以通过索引寻找到的，但是由于设置了XMAX,寻找不到合适的版本而返回一个找不到内容的错误。
+
+#### 2.8.2.可能的错误与恢复
+
+B+树在操作过程中，可能出现两种错误，分别是节点内部错误和节点间关系错误。
+
+当节点内部错误发生时，即当Ti在对节点的数据进行更改时，MYDB发生了崩溃。由于IM依赖于DM，在数据库重启后，Ti会被撤销，在节点的错误影响会被消除。
+
+如果出现了节点间错误，那么一定是下面这种情况:某次对u节点的插入操作创建了新节点，此时sibling(u)=v,但是v却没有被插入到父节点中。
+
+```tex
+[parent]
+    |
+    v
+   [u] -> [v]
+```
+
+正确的状态应当如下：
+
+```te
+[ parent ]
+ |      |
+ v      v
+[u] -> [v]
+```
+
+这时，如果要对节点进行插入或者搜索操作，如果失败，就会继续迭代它的兄弟节点，最终还是可以找到v节点。唯一的缺点仅仅是，无法直接通过父节点找到v了，只能间接地通过u获取到v。
+
+
+
+
+### 2.9.字段与表管理
+
+TBM，表管理器。TBM实现了对字段结构和表结构的管理。同时还有MYDB使用的类SQL语句的解析。
+
+#### 2.9.1.SQL解析器
+
+Parser实现了对类SQL语句的结构化解析，将语句中包含的信息封装为对应语句的类。
+
+MYDB实现的SQL语句语法如下:
+
+```tex
+<begin statement>
+	begin [isolation level(read committed | repeatable read)]
+	begin isolation level read committed
+
+<commit statement>
+	commit
+
+<abort statement>
+	abort
+	
+<create statement>
+	create table <table name>
+	<field name> <field type>
+	<field name> <field type>	
+	...
+	<field name> <field type>	
+	[(index <field name list>)]
+	create table students
+	id int32,
+	name string,
+	age int32
+	(index id name)
+	
+<drop statement>
+	drop table <table name>
+	drop table students
+
+<select statement>
+	select (*|<field name list> from <table name> [<where statement>])
+	select * from student where id = 1
+	select name from student where id > 1 and id < 4
+	select name, age, id from student where id = 12
+	
+<insert statement>
+	insert into <table name> values <value list>
+	insert into students values 5 "zhang san" 22
+	
+<delete statement>
+	delete from <table name> <where statement>
+	delete from student where name = "zhang san"
+<update statement>
+	update <table name> set <fiename> = <value> [<where statement>]
+	update student set name = "zs" where id = 5
+	
+<where statement>
+	where <field name> (>|<|=) <value> [(and|or) <field name> (>|<|=) <value>]
+	
+<field name> <table name>
+	[a-zA-Z][a-zA-Z0-9_]*
+	
+<field type>
+	int32 int64 string
+
+<value>
+ *
+```
+
+parser包的Tokenizer类，对语句进行逐字节解析，根据空白符或者上述词法规则，将语句切割成多个token。对外提供了`peek()`,`pop()`方法方便取出Token继续解析。
+
+Parser类则直接对外提供了`Parse(byte[] statement)`方法，核心就是一个调用Tokeniezer类分割Token,并根据词法规则包装成具体的Statement类并返回。解析过程很简单，仅仅是根据第一个Token来区分语句类型，并分别处理。
+
+#### 2.9.2.字段与表管理
+
+注意，这里的字段与表管理，不是管理各个条目中不同的字段的数值等信息，而是管理表和字段的数据结构，例如表名,表字段信息和字段索引等。
+
+由于TBM基于VM，单个字段信息和表信息都是直接保存在Entry中。字段的二进制表示如下:
+
+![img_4.png](img_4.png)
+
+这里FieldName和TypeName,以及后面的表名，存储的都是字节形式的字符串。这里规定一个字符串的存储方式，以确定其存储边界。
+
+![img_5.png](img_5.png)
+
+TypeName为字段的类型，限定为int32，int64和string类型。如果这个字段有索引，那个IndexUID指向了索引二叉树的根，否则该字段为0.
+
+根据这个结构，通过一个UID从VM中读取并解析如下:
+
+```java
+  public static Field loadField(Table tb, long uid) {
+    byte[] raw = null;
+    try {
+      raw = ((TableManagerImpl)tb.tbm).vm.read(TransactionManagerImpl.SUPER_XID, uid);
+    } catch (Exception e) {
+      Panic.panic(e);
+    }
+    assert raw != null;
+    return new Field(uid, tb).parseSelf(raw);
+  }
+
+  private Field parseSelf(byte[] raw) {
+    int position = 0;
+    ParseStringRes res = Parser.parseString(raw);
+    fieldName = res.str;
+    position += res.next;
+    res = Parser.parseString(Arrays.copyOfRange(raw, position, raw.length));
+    fieldType = res.str;
+    position += res.next;
+    this.index = Parser.parseLong(Arrays.copyOfRange(raw, position, position + 8));
+    if (index != 0) {
+      try {
+        bt = BPlusTree.load(index, ((TableManagerImpl)tb.tbm).dm);
+      } catch (Exception e) {
+        Panic.panic(e);
+      }
+    }
+    return this;
+  }
+```
+
+创建一个字段的方法类似，将相关信息通过VM持久化即可:
+
+```java
+private void persistSelf(long xid) throws Exception {
+  byte[] nameRaw = Parser.string2Byte(fieldName);
+  byte[] typeRaw = Parser.string2Byte(fieldType);
+  byte[] indexRaw = Parser.long2Byte(index);
+  this.uid = ((TableManagerImpl)tb.tbm).vm.insert(xid, Bytes.concat(nameRaw, typeRaw, indexRaw));
+}
+```
+
+一张数据库有多张表，TBM使用链表的形式将其组织起来，每一张表都保存一个指向下一张表的UID。表的二进制结构如下:
+
+这里由于每个Entry中的数据，字节数是确定的，于是无需保存字段的个数。根据UID从Entry表中读取表数据的过程和读取字段的过程类似。
+
+对表和字段的操作，有一个很重要的步骤，就是计算Where条件的范围，目前MYDB的Where只支持两个条件的与和或。例如有条件的Delete，计算where，最终就需要获取到条件范围内所有的UID。MYDB只支持已索引字段作为where的条件。计算where的范围，具体可以看Table的`parseWhere()`和`calWhere()`方法，以及Field类的`calExp()`方法。
+
+由于TBM的表管理，使用的是链表串起的Table结构，所以就必须保存一个链表的头节点，即第一个表的UID，这样在MYDB启动时，才能快速找到表信息。
+
+MYDB使用Booter类和bt文件，来管理MYDB的启动过程，现在所需的启动信息，只有一个：头表的UID。Booter类对外提供了两个方法：load和upload，并保证了其原子性。update在修改bt文件内容时，没有直接对bt文件进行修改，而是首先将内容写入一个bt_tmp文件中，随后将这个文件重命名为bt文件。以此通过操作系统重命名文件的原子性，来保证操作的原子性。
+
+```java
+public void update(byte[] data) {
+  File tmp = new File(path + BOOTER_TMP_SUFFIX);
+  try {
+    tmp.createNewFile();
+  } catch (Exception e) {
+    Panic.panic(e);
+  }
+
+  if (!tmp.canRead() || !tmp.canWrite()) {
+    Panic.panic(Error.FileCannotRWException);
+  }
+  try (FileOutputStream out = new FileOutputStream(tmp)) {
+    out.write(data);
+    out.flush();
+  } catch (Exception e) {
+    Panic.panic(e);
+  }
+  try {
+    Files.move(tmp.toPath(), new File(path + BOOTER_SUFFIX).toPath() , StandardCopyOption.REPLACE_EXISTING);
+  } catch (IOException e) {
+    Panic.panic(e);
+  }
+  file = new File(path + BOOTER_SUFFIX);
+  if (!file.canRead() || !file.canWrite()) {
+    Panic.panic(Error.FileCannotRWException);
+  }
+}
+```
+
+#### 2.9.3.TableManager
+
+TBM层对外提供服务的是TableManager接口，如下：
+
+```java
+public interface TableManager {
+
+
+  BeginRes begin(Begin begin);
+  byte[] commit(long xid) throws Exception;
+  byte[] abort(long xid);
+
+  byte[] show(long xid);
+  byte[] create(long xid, Create create) throws Exception;
+
+  byte[] insert(long xid, Insert insert) throws Exception;
+  byte[] read(long xid, Select select) throws Exception;
+  byte[] update(long xid, Update update) throws Exception;
+  byte[] delete(long xid, Delete delete) throws Exception;
+```
+
+由于TableManager已经是直接被最外层Server调用(MYDB是C/S结构)，这些方法直接返回执行的结果，例如错误信息或者结果信息的字节数组(可读)。
+
+各个方法的具体实现，就是调用VM的相关方法。有一点值的注意，在创建新表时，采用的是头插法，所以每次创建表都需要更新Booter文件。
+
+### 2.10.服务端客户端的实现及其通信规则
+
+MYDB被设计成C/S结构，类似于MySQL。支持启动一个服务器，并有多个客户端去连接，通过socket通信，执行SQL返回结果。
+
+#### 2.10.1.C/S通信
+
+MYDB使用了一种特殊的二进制格式。
+
+传输的最基本结构，是Package：
+
+```java
+public class Package {
+  byte[] data;
+  Exception err;
+}
+```
+
+每个Package在发送前，由Encoder编码为字节数组，在对方收到后同样会由Encoder解码成Package对象。编码和解码的规则如下：
+
+![img_6.png](img_6.png)
+
+若flag为0，表示发送的是数据，那么data即为这份数据本身；如果flag为1，表示发送的是错误，data是Exception.getMessage()的错误提示信息。如下:
+
+```java
+public class Encoder {
+
+  public byte[] encode(Package pkg) {
+    if (pkg.getErr() != null) {
+      Exception err = pkg.getErr();
+      String msg = "Intern server error!";
+      if (err.getMessage() != null) {
+        msg = err.getMessage();
+      }
+      return Bytes.concat(new byte[]{1}, msg.getBytes());
+    } else {
+      return Bytes.concat(new byte[]{0}, pkg.getData());
+    }
+  }
+
+  public Package decode(byte[] data) throws Exception {
+    if (data.length < 1) {
+      throw Error.InvalidPkgDataException;
+    }
+    if (data[0] == 0) {
+      return new Package(Arrays.copyOfRange(data, 1, data.length), null);
+    } else if (data[0] == 1) {
+      return new Package(null, new RuntimeException(new String(Arrays.copyOfRange(data, 1, data.length))));
+    } else {
+      throw Error.InvalidPkgDataException;
+    }
+  }
+
+}
+```
+
+编码之后的信息会通过Transporter类，写入输出流发送出去。为了避免特殊字符造成影响，这里会将数据转成十六进制字符串(Hex String),并为信息末尾加上换行符。这样在发送和接收数据时，就可以很简单地使用BufferedReader和Writer来直接按行读写了。
+
+```java
+public class Transporter {
+  private Socket socket;
+  private BufferedReader reader;
+  private BufferedWriter writer;
+
+  public Transporter(Socket socket) throws IOException {
+    this.socket = socket;
+    this.reader = new BufferedReader(new InputStreamReader(socket.getInputStream()));
+    this.writer = new BufferedWriter(new OutputStreamWriter(socket.getOutputStream()));
+  }
+
+  public void send(byte[] data) throws IOException {
+    String raw = hexEncode(data);
+    writer.write(raw);
+    writer.flush();
+  }
+
+  public byte[] receive() throws Exception {
+    String line = reader.readLine();
+    if (line == null) {
+      close();
+    }
+    return hexDecode(line);
+  }
+
+  public void close() throws IOException {
+    writer.close();
+    reader.close();
+    socket.close();
+  }
+
+
+
+  private String hexEncode(byte[] buf) {
+    return Hex.encodeHexString(buf, true) + "\n";
+  }
+
+  private byte[] hexDecode(String buf) throws DecoderException {
+    return Hex.decodeHex(buf);
+  }
+
+}
+```
+
+Packager则是Encoder和Transporter的结合体，直接对外提供send和receive方法:
+
+```java
+public class Packager {
+
+  private Transporter transporter;
+  private Encoder encoder;
+
+  public Packager(Transporter transporter, Encoder encoder) {
+    this.transporter = transporter;
+    this.encoder = encoder;
+  }
+
+  public void send(Package pkg) throws IOException {
+    byte[] data = encoder.encode(pkg);
+    transporter.send(data);
+  }
+
+  public Package receive() throws Exception {
+    byte[] data = transporter.receive();
+    return encoder.decode(data);
+  }
+
+  public void close() throws IOException {
+    transporter.close();
+  }
+}
+```
+
+#### 2.10.2.Server和Client的实现
+
+Server启动一个ServerSocket监听端口，当有请求的到来时直接把请求丢给一个新线程处理
+
+HandleSocket类实现了Runnable接口，在建立连接后初始化Packager，随后就循环接收来自客户端的数据并处理：
+
+```java
+Packager packager = null;
+try {
+  Transporter t = new Transporter(socket);
+  Encoder e = new Encoder();
+  packager = new Packager(t, e);
+} catch (IOException e) {
+  e.printStackTrace();
+  try {
+    socket.close();
+  } catch (IOException e1) {
+    e1.printStackTrace();
+  }
+}
+Executor exe = new Executor(tbm);
+while(true) {
+  Package pkg = null;
+  try {
+    pkg = packager.receive();
+  } catch (Exception e) {
+    break;
+  }
+  byte[] sql = pkg.getData();
+  byte[] result = null;
+  Exception e = null;
+  try {
+    result = exe.execute(sql);
+  } catch (Exception e1) {
+    e = e1;
+    e.printStackTrace();
+  }
+  pkg = new Package(result, e);
+  try {
+    packager.send(pkg);
+  } catch (Exception e1) {
+    e1.printStackTrace();
+    break;
+  }
+}
+exe.close();
+try {
+  packager.close();
+} catch (Exception e) {
+  e.printStackTrace();
+}
+```
+
+处理的核心是Executor类，Executor调用Parser获取到对应语句的结构化信息对象，并根据对象的类型，调用TBM的不同方法进行处理。
+
+Launcher是服务器的启动入口。这个类解析了命令行参数。有两个参数-open或者-create。Launcher根据两个参数，来决定是创建数据库文件，还是启动一个已有的数据库。
+
+```java
+private static void createDB(String path) {
+  TransactionManagerImpl tm = TransactionManager.create(path);
+  DataManager dm = DataManager.create(path, DEFAULT_MEM, tm);
+  VersionManagerImpl vm = new VersionManagerImpl(tm, dm);
+  TableManager.create(path, vm, dm);
+  tm.close();
+  dm.close();
+}
+
+private static void openDB(String path, long mem) {
+  TransactionManager tm = TransactionManager.open(path);
+  DataManager dm = DataManager.open(path, mem, tm);
+  VersionManager vm = new VersionManagerImpl(tm, dm);
+  TableManager tbm = TableManager.open(path, vm, dm);
+  new Server(port, tbm).start();
+}
+```
+
+客户端连接服务器的过程，通过一个简单的shell，读入用户的输入，并调用Client.execute().
+
+```java
+  public byte[] execute(byte[] stat) throws Exception {
+    Package pkg = new Package(stat, null);
+    Package resPkg = rt.roundTrip(pkg); // 执行后接收包
+    if (resPkg.getErr() != null) { // 如果包中异常不为空，抛出异常
+      throw resPkg.getErr();
+    }
+    return resPkg.getData(); // 没有异常的话，就返回数据
+  }
+```
+
+BoundTripper类实际上实现了单次收发动作:
+
+```java
+  public Package roundTrip(Package pkg) throws Exception {
+    packager.send(pkg);
+    return packager.receive();
+  }
+```
+
+最后附上客户端的启动入口，把Shell run起来即可。
+
+```java
+public class Launcher {
+
+  public static void main(String[] args) throws IOException {
+    Socket socket = new Socket("127.0.0.1", 9999);
+    Encoder e = new Encoder();
+    Transporter t = new Transporter(socket);
+    Packager packager = new Packager(t, e);
+
+    Client client = new Client(packager);
+    Shell shell = new Shell(client);
+    shell.run();
+  }
+}
+
+```
 

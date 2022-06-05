@@ -174,7 +174,7 @@ public class Table {
       byte[] raw = ((TableManagerImpl) tbm).vm.read(xid, uid); // 读到旧值
       if (raw == null) continue;
 
-      ((TableManagerImpl)tbm).vm.delete(xid, uid); // 就旧值删除，起始就是把mMax修改成对应xid
+      ((TableManagerImpl)tbm).vm.delete(xid, uid); // 旧值删除，其实就是把XMax修改成对应xid
       Map<String, Object> entry = parseEntry(raw); // 根据属性名称以及长度得到属性以及value的对应关系
       entry.put(fd.fieldName, value); // 直接覆盖
       raw = entry2Raw(entry); // 修改后的entry转成raw

@@ -17,6 +17,7 @@ import java.util.List;
  * 二进制格式为:
  * [FieldName][TypeName][IndexUid]
  * 如果field无索引，IndexUid为0
+ * [StringLength][StringData]
  * @author axuan
  * @date 2022/5/23
  **/

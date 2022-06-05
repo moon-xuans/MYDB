@@ -171,6 +171,7 @@ public class Node {
     n.tree = bTree;
     n.dataItem = di;
     n.raw = di.data();
+    n.uid = uid;
     return n;
   }
 
