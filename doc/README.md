@@ -15,7 +15,7 @@ MYDB是一个Java实现的简单的基于文件的简易版数据库，实现了
 ### 2.1.TM(事务控制)
 TM通过维护XID文件来维护事务的状态，并提供接口供其他模块来查询某个事务。
 #### 2.1.1.xid文件的定义
-![img.png](img/img.png)
+![](https://raw.githubusercontent.com/moon-xuans/mediaImage/main/2022/202207111519218.png)
 xid文件的前8个字节，记录事务的个数，事务xid的状态记录在(xid - 1) + 8字节处，每个事务的状态由由一个字节表示，状态分为3种，0代表活跃状态，1代表提交状态，2代表丢弃状态。
 ```java
   // 事务的三种状态
@@ -412,7 +412,7 @@ public interface PageCache {
 什么的。MYDB的第一页，只是用来做启动检查的。具体的原理是，在每次数据库启动时，
 会生成一串随机字节，存储在100～107字节。在数据库正常关闭时，会将这串字节，拷贝
 到第一页的108～115字节。
-![img_25.png](img/img_25.png)
+![](https://raw.githubusercontent.com/moon-xuans/mediaImage/main/2022/202207111529037.png)
 
 这样数据库在每次启动时，就会检查第一页两处的字节是否相同，以此来判断上一次是否正常关闭。
 如果是异常关闭，就需要执行数据的恢复流程(通过日志进行恢复).
@@ -458,7 +458,7 @@ public interface PageCache {
 ##### 2.3.2.2.普通页
 MYDB在普通数据页的管理比较简单。一个普通页面以一个2字节无符号数起始，表示
 这一页的空闲位置的偏移。剩下的部分都是实际存储的数据。
-![img_38.png](img/img_38.png)
+![](https://raw.githubusercontent.com/moon-xuans/mediaImage/main/2022/202207111531305.png)
 所以对普通页的管理，基本都是围绕对FSO(Free Space Offset)进行的。例如
 向页面插入数据：
 ```java
@@ -547,14 +547,14 @@ MYDB提供了崩溃后的数据恢复功能。DM层在每次对底层数据操�
 到磁盘上。在数据库崩溃之后，再次启动时，可以根据日志的内容，恢复数据文件，保证其一致性。
 #### 2.4.1.日志读写
 日志的二进制文件，按照如下的格式进行排布：
-![img_39.png](img/img_39.png)
+![](https://raw.githubusercontent.com/moon-xuans/mediaImage/main/2022/202207111532922.png)
 其中XCheckNum是一个四字节的整数，是对后续所有日志计算的校验和。Log1~LogN
 是常规的日志数据，BadTail是在数据库崩溃时，没有来得及写完的日志数据，这个BadTail
 不一定存在。
 
 每条日志的格式如下：
 
-![img_40.png](img/img_40.png)
+![](https://raw.githubusercontent.com/moon-xuans/mediaImage/main/2022/202207111532976.png)
 
 其中，Size是一个四字节整数，标识了Data段的字节数。CheckSum则是该条日志的校验和。
 
@@ -742,7 +742,7 @@ MYDB中没有真正的删除操作，对于插入操作的undo，只是将其中
 
   private static final byte LOG_TYPE_UPDATE = 1; // 更新日志的标识符
 ```
-![img_43.png](img/img_43.png)
+![](https://raw.githubusercontent.com/moon-xuans/mediaImage/main/2022/202207111536497.png)
 跟原理中描述的类似，recover过程主要也是两步：重做所有已完成事务，撤销所有
 未完成事务：
 ```java
@@ -951,7 +951,7 @@ public class DataItemImpl implements DataItem {
 DataItem),以及修改数据时落地日志。
 
 DataItem中保存的数据，结构如下：
-![img_48.png](img/img_48.png)
+![](https://raw.githubusercontent.com/moon-xuans/mediaImage/main/2022/202207111536777.png)
 
 其中ValidFlag占用1字节，标识了该DataItem是否有效。删除一个DataItem
 ，只需要简单地将其有效位置设置为0。DataSize占用2字节，标识了后面Data
@@ -1223,8 +1223,8 @@ public class Entry {
 
 我们，规定一条Entry中存储的数据格式如下：
 
-![img_1.png](img/img_1.png)
-![img_2.png](img/img_2.png)
+![](https://raw.githubusercontent.com/moon-xuans/mediaImage/main/2022/202207111517711.png)
+![](https://raw.githubusercontent.com/moon-xuans/mediaImage/main/2022/202207111520369.png)
 XMIN是创建该条记录(版本)的事务编号，而XMAX则是删除该条记录(版本)的事务编号。Data就是这条记录持有的数据。根据这个结构，在创建记录时调用的`wrapEntryRaw()`方法如下:
 
 ```java
@@ -1805,7 +1805,7 @@ IM直接依赖于DM，而没有基于VM。索引的数据被直接插入数据�
 
 二叉树由一个个Node组成，每个Node都存储一条DataItem中。结构如下:
 
-![img_3.png](img/img_3.png)
+![](https://raw.githubusercontent.com/moon-xuans/mediaImage/main/2022/202207111521134.png)
 
 其中LeafFlag标记了该节点是否是叶子节点；KeyNumber为该节点key的个数；SiblingUid是其兄弟节点存储在DM中的UID。后续是穿插的子节点(SonN)和KyeN。最后一个KeyN始终为MAX_VALUE,以此方便查找。
 
@@ -2065,11 +2065,11 @@ Parser类则直接对外提供了`Parse(byte[] statement)`方法，核心就是�
 
 由于TBM基于VM，单个字段信息和表信息都是直接保存在Entry中。字段的二进制表示如下:
 
-![img_4.png](img/img_4.png)
+![](https://raw.githubusercontent.com/moon-xuans/mediaImage/main/2022/202207111530581.png)
 
 这里FieldName和TypeName,以及后面的表名，存储的都是字节形式的字符串。这里规定一个字符串的存储方式，以确定其存储边界。
 
-![img_5.png](img/img_5.png)
+![](https://raw.githubusercontent.com/moon-xuans/mediaImage/main/2022/202207111522374.png)
 
 TypeName为字段的类型，限定为int32，int64和string类型。如果这个字段有索引，那个IndexUID指向了索引二叉树的根，否则该字段为0.
 
@@ -2202,7 +2202,7 @@ public class Package {
 
 每个Package在发送前，由Encoder编码为字节数组，在对方收到后同样会由Encoder解码成Package对象。编码和解码的规则如下：
 
-![img_6.png](img/img_6.png)
+![](https://raw.githubusercontent.com/moon-xuans/mediaImage/main/2022/202207111524887.png)
 
 若flag为0，表示发送的是数据，那么data即为这份数据本身；如果flag为1，表示发送的是错误，data是Exception.getMessage()的错误提示信息。如下:
 
