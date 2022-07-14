@@ -16,6 +16,6 @@ mvn exec:java -Dexec.mainClass="com.axuan.mydb.backend.Launcher" -Dexec.args="-o
 mvn exec:java -Dexec.mainClass="com.axuan.mydb.client.Launcher"
 ```
 效果如下:
-![img.png](doc/img/202006020952img.png)
+![202006020952img](https://raw.githubusercontent.com/moon-xuans/mediaImage/main/2022/202207142003102.png)
 
-![img.png](doc/img/202006020953.png)
+![202006020953](https://raw.githubusercontent.com/moon-xuans/mediaImage/main/2022/202207142008069.png)
